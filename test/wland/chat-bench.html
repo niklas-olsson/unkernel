@@ -1,0 +1,158 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright 2026 the unkernel contributors -->
+<meta charset="utf-8">
+<title>kw-chat-loading</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; background: #10161b; font: 14px system-ui, sans-serif; }
+  body { margin: 0; }
+  #app {
+    width: 900px; height: 650px; display: grid; overflow: hidden; isolation: isolate;
+    grid-template-columns: 58px 167px 1fr; grid-template-rows: 55px 1fr 68px;
+    background: #202931; color: #e4e9f1;
+  }
+  header { display: flex; align-items: center; gap: 18px; grid-area: 1 / 2 / 2 / 4;
+           padding: 0 20px; background: #27333a; border-bottom: 1px solid #3a494f; }
+  header strong { font-size: 18px; }
+  header span { color: #b4c7c5; }
+  #spaces { grid-area: 1 / 1 / 4 / 2; background: #182026; padding: 7px; overflow: auto; }
+  .space { display: block; color: #d6ecf0; margin: 8px auto; width: 38px; height: 38px;
+           border-radius: 11px; border: 0; background: #32424f; }
+  .space:first-child { background: #285d57; }
+  #channels { grid-area: 2 / 2 / 4 / 3; padding: 8px; overflow: auto; background: #1b242a; }
+  .channel { border-radius: 5px; padding: 7px; margin: 1px 0; color: #baccd1; }
+  .channel.active { background: #2e4547; color: white; }
+  #channels h2 { color: #88adae; margin: 13px 7px 4px; font-size: 12px; }
+  #feed { overflow: auto; grid-area: 2 / 3 / 3 / 4; min-height: 0; contain: strict; }
+  article { padding: 8px 17px; min-height: 54px; display: grid;
+            grid-template-columns: 36px 1fr; gap: 10px; }
+  article:nth-child(odd) { background: #242e36; }
+  article:hover { background: #293941; }
+  .avatar { width: 33px; height: 33px; border-radius: 45%; display: grid; place-items: center;
+            background: hsl(var(--hue) 33% 25%); color: #f1f3ed; }
+  time { font-size: 11px; color: #b2bfc4; padding-left: 8px; }
+  article p { margin: 4px 0; color: #d9e1e7; }
+  .reactions { font-size: 12px; background: #253f41; color: #b5e3db; padding: 2px 7px; border-radius: 8px; }
+  .card { width: 235px; padding: 12px; margin: 7px 0; border-radius: 8px;
+          background: linear-gradient(135deg, #364f50, #252c46); border: 1px solid #45666b; }
+  #dock { grid-area: 3 / 3 / 4 / 4; padding: 8px 12px; border-top: 1px solid #36464d; }
+  #draft { display: block; width: 100%; height: 35px; resize: none; overflow: hidden;
+           background: #172026; color: #fff; caret-color: transparent; outline: none;
+           border: 1px solid #526269; border-radius: 6px; padding: 2px 9px;
+           font: 20px/29px monospace; white-space: pre; }
+  #dock small { display: block; margin: 3px 0; color: #abc0c2; }
+</style>
+<main id="app">
+  <header><strong>Field Notes</strong><span>›</span><span>trail-planning</span></header>
+  <nav id="spaces" aria-label="Spaces"></nav>
+  <nav id="channels" aria-label="Channels"></nav>
+  <section id="feed" aria-label="Messages" tabindex="0"></section>
+  <section id="dock"><textarea id="draft" aria-label="Unsent message draft" spellcheck="false"></textarea><small>Local draft</small></section>
+</main>
+<script>
+'use strict';
+const spaces = document.getElementById('spaces');
+const channels = document.getElementById('channels');
+const feed = document.getElementById('feed');
+const draft = document.getElementById('draft');
+const names = ['Avery', 'Blair', 'Casey', 'Devin', 'Ellis', 'Frankie', 'Gray', 'Harper', 'Indigo', 'Jules', 'Kai', 'Lou'];
+for (const label of ['FN', 'SC', 'TR', 'CL', 'NV', 'BK', 'FF', 'FT', 'SF', 'ET', 'CH', 'ST']) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'space';
+  button.textContent = label;
+  spaces.append(button);
+}
+for (const category of ['Trips', 'Routes', 'Weather', 'Equipment', 'Community', 'Archive']) {
+  const title = document.createElement('h2');
+  title.textContent = category;
+  channels.append(title);
+  for (const topic of ['trail-planning', 'updates', 'general', 'questions', 'photos', 'weekly', 'resources', 'notes']) {
+    const item = document.createElement('div');
+    item.className = 'channel' + (category === 'Trips' && topic === 'trail-planning' ? ' active' : '');
+    item.textContent = '# ' + topic;
+    channels.append(item);
+  }
+}
+const sentences = [
+  'The ridge route is clear this morning. Bring an extra layer for the exposed section.',
+  'I updated the map with the creek crossing and the lower parking area.',
+  'Forecast looks better after lunch. Let us keep the alternate route as a backup.',
+  'Our spare batteries and the first-aid kit are packed. Meet at the station.',
+  'I found a quiet spot by the lake. The access path is marked on page four.',
+  'Thanks for posting the update. I have added the waypoint to my notes.',
+  'Is everyone set for the new departure time? The gate opens at eight.',
+  'Attached the revised trail card. Take note of the shorter descent option.',
+];
+const messages = document.createDocumentFragment();
+for (let i = 0; i < 320; i++) {
+  const name = names[(i * 5) % names.length];
+  const article = document.createElement('article');
+  article.dataset.row = i;
+  article.innerHTML = `<span class="avatar" style="--hue:${(i * 43) % 360}">${name[0]}</span>
+    <div><strong>${name}</strong><time>${String(8 + (i % 10)).padStart(2, '0')}:${String((i * 13) % 60).padStart(2, '0')}</time>
+    <p>${sentences[(i * 3 + Math.floor(i / 8)) % sentences.length]}</p>
+    ${i % 13 === 0 ? '<div class="card">Trail card<br>Updated route and landmarks</div>' : ''}
+    ${i % 5 === 0 ? '<span class="reactions">✓ 3 &nbsp; + 2</span>' : ''}</div>`;
+  messages.append(article);
+}
+feed.append(messages);
+const gaps = times => times.slice(1).map((time, i) => time - times[i]);
+const stats = samples => {
+  const ordered = samples.slice().sort((a, b) => a - b);
+  const at = p => Math.round(100 * ordered[Math.ceil(p * ordered.length) - 1]) / 100;
+  return ordered.length ? { n: ordered.length, p50: at(.5), p95: at(.95) } : { n: 0 };
+};
+let run;
+let readyMs;
+document.addEventListener('keydown', event => {
+  if (!event.isTrusted || event.target !== draft) return;
+  if (event.key === 'F8' && !run) {
+    event.preventDefault();
+    draft.value = '';
+    feed.scrollTop = 0;
+    run = { keys: [], input: [], wheel: [], scroll: [], frames: [] };
+    const frame = at => {
+      if (run?.end) return;
+      run.frames.push(at);
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+    document.title = 'kw-chat-armed';
+  } else if (event.key === 'F9' && run && !run.end) {
+    event.preventDefault();
+    run.end = true;
+    const firstWheel = run.wheel[0], lastWheel = run.wheel.at(-1);
+    const inWheel = times => times.filter(at => at >= firstWheel && at <= lastWheel);
+    const result = {
+      readyMs: Math.round(readyMs),
+      viewport: [innerWidth, innerHeight, devicePixelRatio],
+      draft: draft.value,
+      scrollTop: feed.scrollTop,
+      wheelEvents: run.wheel.length,
+      wheelMs: run.wheel.length ? Math.round(lastWheel - firstWheel) : null,
+      keydownToInputMs: stats(run.input.map((at, i) => at - run.keys[i]).filter(Number.isFinite)),
+      scrollEventGapMs: stats(gaps(inWheel(run.scroll))),
+      scrollRafGapMs: stats(gaps(inWheel(run.frames))),
+    };
+    document.title = 'kw-chat-result ' + JSON.stringify(result);
+  } else if (event.key === 'm' && run && !run.end) {
+    run.keys.push(performance.now());
+  }
+}, true);
+draft.addEventListener('input', e => {
+  if (e.isTrusted && run && !run.end) run.input.push(performance.now());
+});
+feed.addEventListener('wheel', e => {
+  if (e.isTrusted && run && !run.end) run.wheel.push(performance.now());
+}, { passive: true });
+feed.addEventListener('scroll', () => {
+  if (run && !run.end) run.scroll.push(performance.now());
+}, { passive: true });
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  readyMs = performance.now();
+  document.title = 'kw-chat-ready';
+}));
+</script>

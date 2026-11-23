@@ -102,6 +102,8 @@
 //             (debian-disk.mjs --chromium: chromium as apt installs it, and
 //             Mesa's EGL, 260 MiB gzipped)
 //
+//   --chat-bench  measure typing and feed scroll on the same offline chat fixture
+//             in the host browser and in Debian Chromium (see chat-bench.md).
 //   --firefox  instead of the cases above, in worker mode on 4 CPUs with
 //             mem=2048 (--only and --cpus change them): firefox-esr from a
 //             login shell maps its window on a local page whose title shows
@@ -118,7 +120,7 @@
 //      goes idle and the new page fetches nothing of wland, and a plain
 //      `foot` typed in that terminal maps (the relay dials again)
 //
-//   node test/wland/page-check.mjs [--port N] [--cpus N] [--only worker|inline] [--apps] [--gtk] [--keys] [--pacing] [--all] [--gpu] [--chromium] [--firefox] [--suspend] [--fresh] [--built] [--output DIR] [--chrome BIN] [--timeout S] [--shots DIR] [--keep-open] [--verbose]
+//   node test/wland/page-check.mjs [--port N] [--cpus N] [--only worker|inline] [--apps] [--gtk] [--keys] [--pacing] [--all] [--gpu] [--chromium] [--chat-bench] [--firefox] [--suspend] [--fresh] [--built] [--output DIR] [--chrome BIN] [--timeout S] [--shots DIR] [--keep-open] [--verbose]
 //
 // --fresh skips the prepared disk: the foot tile installs its packages with
 // apt over the page's network (the internet; minutes) before foot maps; use
@@ -128,7 +130,7 @@
 // passed, 1 on a failure, 2 when it could not run.
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -142,8 +144,9 @@ const opt = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
 const port = Number(opt("--port", "8092"));
 const timeout = Number(opt("--timeout", "900")) * 1000;
 const firefoxTest = args.includes("--firefox");
-const cpus = opt("--cpus", firefoxTest ? "4" : "1");
-const only = opt("--only", firefoxTest ? "worker" : "");
+const chatTest = args.includes("--chat-bench");
+const cpus = opt("--cpus", firefoxTest || chatTest ? "4" : "1");
+const only = opt("--only", firefoxTest || chatTest ? "worker" : "");
 const shots = opt("--shots", "");
 const suspendTest = args.includes("--suspend");
 const all = args.includes("--all");
@@ -155,7 +158,17 @@ const chromeBin = opt("--chrome", process.env.CHROME || findChrome());
 const build = process.env.KW_BUILD ? resolve(process.env.KW_BUILD) : join(root, "vendor/build");
 const gpuTest = args.includes("--gpu");
 const chromiumTest = args.includes("--chromium");
-const diskGz = join(build, firefoxTest ? "wland/debian-wland-firefox.img.kwsparse.gz" : gpuTest ? "wland/debian-wland-gl.img.kwsparse.gz" : chromiumTest ? "wland/debian-wland-chromium.img.kwsparse.gz" : "wland/debian-wland.img.kwsparse.gz");
+if (chatTest) {
+	const conflicts = ["--fresh", "--apps", "--gtk", "--keys", "--pacing", "--all", "--gpu", "--chromium", "--firefox", "--suspend"]
+		.filter((arg) => args.includes(arg));
+	if (conflicts.length || !["worker", "inline"].includes(only)) {
+		console.error("--chat-bench runs by itself with a prepared Chromium disk and --only worker or inline");
+		if (conflicts.length) console.error(`incompatible switches: ${conflicts.join(", ")}`);
+		process.exit(2);
+	}
+}
+const diskKind = chatTest ? "chromium" : firefoxTest ? "firefox" : gpuTest ? "gl" : chromiumTest ? "chromium" : "";
+const diskGz = join(build, `wland/debian-wland${diskKind ? "-" + diskKind : ""}.img.kwsparse.gz`);
 /** The kw layer's wland (not on the PATH of KW.vm.exec()'s shells). */
 const WL = "/usr/lib/kw/bin/wland";
 const t0 = performance.now();
@@ -170,7 +183,7 @@ const report = (name, ok, detail) => {
 
 if (!fresh && !existsSync(diskGz)) {
 	say("making the prepared disk (test/wland/debian-disk.mjs)");
-	try { execFileSync(process.execPath, [join(here, "debian-disk.mjs"), ...(firefoxTest ? ["--firefox"] : gpuTest ? ["--gl"] : chromiumTest ? ["--chromium"] : [])], { stdio: "inherit" }); } catch {
+	try { execFileSync(process.execPath, [join(here, "debian-disk.mjs"), ...(diskKind ? [`--${diskKind}`] : [])], { stdio: "inherit" }); } catch {
 		console.error("the prepared disk could not be made");
 		process.exit(2);
 	}
@@ -199,7 +212,7 @@ const chrome = spawn(chromeBin, [
 	// keep small (64 MiB): there the GL page's buffers and a Suspend's snapshot ran out of it (a crashed
 	// renderer, then net::ERR_INSUFFICIENT_RESOURCES for the page's scripts, 2026-11-22).
 	"--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--hide-scrollbars",
-	"--window-size=1280,800", `--remote-debugging-port=${dport}`, `--user-data-dir=${profile}`, "about:blank",
+	...(chatTest ? ["--window-size=1600,1000", "--force-device-scale-factor=1"] : ["--window-size=1280,800"]), `--remote-debugging-port=${dport}`, `--user-data-dir=${profile}`, "about:blank",
 ], { stdio: ["ignore", "ignore", args.includes("--verbose") ? "inherit" : "ignore"] });
 const cleanup = async () => {
 	chrome.kill("SIGKILL");
@@ -314,7 +327,7 @@ try {
 		if (!await waitFor("typeof globalThis.KW?.ready === 'function'", 120000)) throw new Error(`the page did not load: ${await evaluate("location.href + ' | ' + document.body?.innerText.replace(/\\s+/g, ' ').slice(0, 600)").catch((e) => e.message)}`);
 		await evaluate("KW.ready().then(() => 1)");
 	};
-	const base = `http://127.0.0.1:${port}/?distro=debian${cpus !== "0" ? `&cpus=${cpus}` : ""}&mem=${firefoxTest ? 2048 : 1024}&autosuspend=0&askleave=0&autohide=0`;
+	const base = `http://127.0.0.1:${port}/?distro=debian${cpus !== "0" ? `&cpus=${cpus}` : ""}&mem=${firefoxTest || chatTest ? 2048 : 1024}&autosuspend=0&askleave=0&autohide=0${chatTest ? "&net=0&gl=1" : ""}`;
 
 	// --- input as a keyboard and a mouse send it (Input.dispatch*) ---
 	const MOD = { alt: 1, ctrl: 2, meta: 4, shift: 8 };
@@ -550,6 +563,96 @@ addEventListener("scroll",T);addEventListener("resize",T);addEventListener("keyd
 		await waitFor("KW.wayland.windows().length === 0 && 1", 30000);
 	};
 
+	// Both arms use the same CDP input through the outer browser. The app sends its
+	// results back in a single title update after the timed input and scrolling.
+	const chatCase = async (mode, cfg) => {
+		const fixture = new URL("./chat-bench.html", import.meta.url);
+		const guest = mode !== "host";
+		const draft = "m".repeat(24);
+		const wheel = { count: 180, deltaY: 46, intervalMs: 1000 / 60 };
+		let key, x = 0, y = 0;
+		if (guest) {
+			if (!await sh("command -v chromium")) throw new Error("chat: Chromium is missing from the prepared disk");
+			const contents = readFileSync(fixture).toString("base64");
+			await sh(`printf '%s' '${contents}' | base64 -d >/tmp/kw-chat.html`);
+			const chromeApp = [
+				'chromium --ozone-platform=wayland --user-data-dir="$(mktemp -d)"',
+				"--no-first-run --no-default-browser-check --disable-background-networking --disable-component-update",
+				"--window-size=1000,700 --force-device-scale-factor=1 --app=file:///tmp/kw-chat.html",
+			].join(" ");
+			await launch.plain(chromeApp, "chat");
+			if (!await waitWindow("kw-chat-ready", 240000)) throw new Error(`chat: guest fixture not ready: ${await sh("tail -20 /tmp/wl-chat.log")}`);
+			// Let the host window animation settle before reading canvas coordinates.
+			await sleep(250);
+			key = (await windows()).find((w) => w.title === "kw-chat-ready").key;
+			const bounds = await evaluate(`document.querySelector('canvas[data-wland="' + ${JSON.stringify(key)} + '"]').getBoundingClientRect().toJSON()`);
+			({ x, y } = bounds);
+		} else {
+			await send("Page.navigate", { url: fixture.href });
+			if (!await waitFor("document.title === 'kw-chat-ready'", 10000)) throw new Error("chat: host fixture not ready");
+		}
+		const title = guest ? `KW.wayland.windows().find(w => w.key === ${JSON.stringify(key)})?.title` : "document.title";
+		await mouse(x + 300, y + 606); // composer
+		await press("F8", "F8", 119);
+		if (!await waitFor(`${title} === "kw-chat-armed"`, 15000)) throw new Error("chat: composer did not gain focus");
+		for (const ch of draft) {
+			const deadline = performance.now() + 350;
+			await press(...letter(ch));
+			await sleep(Math.max(0, deadline - performance.now()));
+		}
+		await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: x + 450, y: y + 300 });
+		if (guest) await evaluate(`(() => {
+			const { view } = KW.wayland.wland(), before = view.handle;
+			const commits = [], wheels = [];
+			const onWheel = (event) => { if (event.isTrusted) wheels.push(performance.now()); };
+			document.addEventListener("wheel", onWheel, true);
+			view.handle = function (event) {
+				if (event.type === "commit" && "c" + event.conn + "s" + event.surface === ${JSON.stringify(key)})
+					commits.push({ at: performance.now(), gpu: !!event.gpu });
+				return before.call(this, event);
+			};
+			window.chatCommits = () => {
+				view.handle = before;
+				document.removeEventListener("wheel", onWheel, true);
+				delete window.chatCommits;
+				return { wheels, commits: commits.filter(({ at }) => at >= wheels[0] && at <= wheels.at(-1)) };
+			};
+		})()`);
+		const start = performance.now();
+		const sends = [], dispatched = [];
+		for (let i = 0; i < wheel.count; i++) {
+			await sleep(Math.max(0, start + wheel.intervalMs * i - performance.now()));
+			dispatched.push(performance.now());
+			sends.push(send("Input.dispatchMouseEvent", {
+				type: "mouseWheel", x: x + 450, y: y + 300, deltaX: 0, deltaY: wheel.deltaY,
+			}));
+		}
+		await Promise.all(sends);
+		await sleep(1500);
+		const observed = guest ? await evaluate("window.chatCommits()") : null;
+		await press("F9", "F9", 120);
+		const prefix = "kw-chat-result ";
+		const result = await waitFor(`(${title})?.startsWith(${JSON.stringify(prefix)}) && (${title})`, 30000);
+		if (!result) throw new Error("chat: fixture did not report its result");
+		const app = JSON.parse(result.slice(prefix.length));
+		const commits = observed?.commits ?? [];
+		const duration = (times) => times.length ? +(times.at(-1) - times[0]).toFixed(2) : null;
+		const gaps = commits.slice(1).map(({ at }, i) => at - commits[i].at).sort((a, b) => a - b);
+		const at = (p) => +gaps[Math.ceil(p * gaps.length) - 1].toFixed(2);
+		const browser = guest ? await sh("chromium --version") : (await send("Browser.getVersion")).result.product;
+		const guestState = guest ? { ...cfg, ramMiB: await evaluate("KW.memActualMiB"), onlineCpus: await sh("cat /sys/devices/system/cpu/online") } : null;
+		const ok = app.draft === draft && app.keydownToInputMs.n === draft.length && app.scrollTop > 0 && app.wheelEvents > 0;
+		console.log(JSON.stringify({ benchmark: "chat", mode, browser, guest: guestState, ok,
+			wheel: { ...wheel, dispatchMs: duration(dispatched) }, ...app,
+			...(observed ? { wayland: { wheelEvents: observed.wheels.length, wheelMs: duration(observed.wheels),
+				commits: commits.length, gpuCommits: commits.filter(c => c.gpu).length,
+				commitGapMs: gaps.length ? { n: gaps.length, p50: at(.5), p95: at(.95) } : { n: 0 } } } : {}),
+		}));
+		if (!ok) fails++;
+	};
+
+	if (chatTest) await chatCase("host");
+
 	// The prepared disk into this profile's data disk (the page reloads itself after the import); --fresh: none.
 	if (!fresh) {
 		await openPage(`${base}&worker=0`);
@@ -570,6 +673,7 @@ addEventListener("scroll",T);addEventListener("resize",T);addEventListener("keyd
 		wlandRequests = [];
 		const cfg = JSON.parse(await evaluate("JSON.stringify({ worker: KW.config.worker, cpus: KW.config.cpus, transport: KW.vm.transport ?? 'inline' })"));
 		say(`${mode}: ${JSON.stringify(cfg)}`);
+		if (chatTest) { await chatCase(mode, cfg); continue; }
 		const has = await sh("command -v foot; ls /usr/lib/kw/wlandr /usr/lib/kw/bin/wland");
 		if (chromiumTest) {
 			// As typed in a terminal (a login shell: the session from kw-wayland.sh), then with no Wayland
