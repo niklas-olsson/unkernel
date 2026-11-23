@@ -2730,6 +2730,14 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 
 });
 
+// Run outside the concurrent suite because this observes the inline allocator.
+test("the SMP kernel boots on its first RAM allocation, even with one CPU", { skip: !hasSmpPatch }, async (t) => {
+	const kernel = await sdk.loadKernelModule(kernelBytes, { smp: true });
+	const allocate = t.mock.method(sdk.Kernel, "newMemory");
+	await boot(t, { kernel, cpus: 1, memoryMiB: 256, worker: false });
+	assert.deepEqual(allocate.mock.calls.map(({ arguments: [pages, , shared] }) => [pages, shared]), [[4096, true]]);
+});
+
 // Not with the others: it changes globalThis.crossOriginIsolated, which every worker-mode boot reads.
 test("worker mode: messages where SharedArrayBuffer cannot be used (a page that is not cross-origin isolated); shared: true then rejects", async (t) => {
 	const g = globalThis as { crossOriginIsolated?: boolean };

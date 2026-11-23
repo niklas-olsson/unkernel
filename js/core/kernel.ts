@@ -351,7 +351,7 @@ export class Kernel {
 	memory!: WebAssembly.Memory;
 	memory64 = false;
 	/** The module imports a shared memory (a kernel linked with --shared-memory). */
-	sharedMemory = false;
+	sharedMemory: boolean;
 	wasi!: WasiHost;
 	exports: WebAssembly.Exports | undefined;
 	/** Address of wasm_host_irqs, once instantiated. */
@@ -428,6 +428,9 @@ export class Kernel {
 		this.stats = { switches: 0, idles: 0, yields: 0 };
 		this.block = new BlockHost(this, opts.disks ?? []);
 		const smp = WebAssembly.Module.imports(opts.module).some((i) => i.module === "unkernel" && i.name === "wasm_cpu_start");
+		// The SMP module needs shared RAM even on one CPU. Allocating unshared
+		// RAM first can leave too little address space for the real allocation.
+		this.sharedMemory = smp;
 		const cpus = Math.max(1, Math.floor(opts.cpus ?? 1));
 		if (cpus > 1 && !smp) this.log(`[host] this kernel is not SMP: ${cpus} CPUs asked, it runs on one`);
 		else if (cpus > 1 && !opts.spawnCpu) this.log("[host] this platform cannot start CPU threads: the SMP kernel runs on one CPU");
@@ -1204,9 +1207,8 @@ export class Kernel {
 		});
 
 		this.onStage("instantiate");
-		// The JS API does not show whether the memory import is shared (a
-		// kernel linked with --shared-memory): retry once with the other
-		// sharing when the engine says that is the mismatch; and, for a
+		// A custom module can import different sharing than its CPU imports
+		// suggest. Retry once if the engine reports that mismatch, and, for a
 		// guessed memory type (a module without target_features), once with
 		// the other type.
 		let instance: WebAssembly.Instance | undefined;
