@@ -263,6 +263,58 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		assert.equal(bytes.byteLength, readFileSync(file).byteLength, "the caller's bytes are not detached");
 	});
 
+	test("worker mode: disk timings exclude loading and other disks and arrive before the handle",
+		{ skip: !!process.env.UNKERNEL_DIST && "a worker fixture from the sources" }, async (t) => {
+		const [{ Worker }, { createKernelOn }, { nodePlatform }] = await Promise.all([
+			import("node:worker_threads"), import("../js/core/instance.ts"), import("../js/node/platform.ts")]);
+		const platform = {
+			...nodePlatform(bundledKernelUrl),
+			spawnWorker() {
+				const w = new Worker(new URL("./worker-disk-timing-fixture.ts", import.meta.url));
+				return {
+					post: (msg, transfer) => w.postMessage(msg, transfer),
+					listen(h) {
+						w.on("message", h.message);
+						w.on("error", h.error);
+						w.on("exit", h.exit);
+					},
+					terminate: () => void w.terminate(),
+				} satisfies import("../js/core/worker-protocol.ts").WorkerEndpoint;
+			},
+		};
+		for (const compileInWorker of [false, true]) {
+			const stages: import("../js/core/instance.ts").BootProgress[] = [];
+			const vm = await createKernelOn(platform, {
+				worker: true, shared: !compileInWorker, compileInWorker,
+				kernel: compileInWorker ? kernelFile : kernelModule,
+				memoryMiB: 256, vsock: false, cmdline: "console=hvc0 rdinit=/bin/true", log: () => {},
+				disks: [
+					{ kind: "http", url: "https://example.invalid/disk", optional: true },
+					{ kind: "data", template: "bundled", mode: "snapshot", name: "disk-timing-fixture" },
+					{ kind: "data", template: new Uint8Array(), optional: true, mode: "snapshot", name: "disk-timing-fixture" },
+				],
+				onProgress: (p) => stages.push(p),
+			});
+			t.after(() => vm.stop({ reason: "test cleanup" }));
+			assert.deepEqual(stages.filter((p) => p.stage === "disk"), [
+				{ stage: "disk", index: 0, kind: "http", ms: 19000 },
+				{ stage: "disk", index: 1, kind: "data", ms: 23 },
+				{ stage: "disk", index: 2, kind: "data", ms: 7 },
+			]);
+			const names = stages.map((p) => p.stage);
+			if (compileInWorker) {
+				assert.ok(names.indexOf("compiled") < names.indexOf("disk"), names.join(","));
+				assert.equal(stages.find((p) => p.stage === "compiled")?.ms, 8000);
+			}
+			assert.ok(names.lastIndexOf("disk") < names.indexOf("memory"), names.join(","));
+			assert.ok(vm instanceof sdk.WorkerKernel);
+			assert.equal(vm.transport, compileInWorker ? "messages" : "shared");
+			assert.deepEqual(vm.disks.map((d) => [d.index, d.kind, d.persistent]), [[1, "data", false]]);
+			assert.deepEqual(vm.skippedDisks.map((d) => d.index), [0, 2]);
+			await vm.stop({ reason: "test" });
+		}
+	});
+
 	test("worker mode rejects device objects (naming the spec instead)", async (t) => {
 		const disk = { size: 1 << 20, read: () => {} } as unknown as import("../js/node.ts").BlockDevice;
 		await assert.rejects(createKernel({ worker: true, disks: [{ kind: "file", path: "/nonexistent" }, disk] }), (e: Error) =>

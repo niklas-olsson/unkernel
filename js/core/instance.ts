@@ -35,8 +35,8 @@ import type { KernelTransport } from "./worker-shared.ts";
 
 /**
  * Boot progress, in order: downloads (with compile overlapping them when
- * streaming), memory, instantiate, start. Worker mode adds "worker" (the
- * worker runs, and whether it has JSPI) before "memory": it may come
+ * streaming), disk specs, memory, instantiate, start. Worker mode adds
+ * "worker" (the worker runs, and whether it has JSPI) before "memory": it may come
  * before, during or after the download and compile, which run on the
  * owner's thread while the worker starts (unless compileInWorker).
  */
@@ -45,6 +45,8 @@ export type BootProgress =
 	| DownloadProgress
 	| { stage: "compile" }
 	| { stage: "compiled"; ms: number; memory64: boolean }
+	/** Time spent building one spec in the `disks` option, including an attempt that failed. */
+	| { stage: "disk"; index: number; kind: string; ms: number }
 	| ({ stage: "memory" } & MemoryStage)
 	| { stage: "instantiate" }
 	| { stage: "start"; cmdline: string };
@@ -967,7 +969,7 @@ export async function createKernelOn(platform: Platform, opts: CreateKernelOptio
 	const items = opts.disks ?? [];
 	let built: Awaited<ReturnType<typeof buildDisks>>;
 	try {
-		built = await buildDisks(items, platform.devices, devCtx);
+		built = await buildDisks(items, platform.devices, devCtx, (index, kind, ms) => progress({ stage: "disk", index, kind, ms }));
 	} catch (e) {
 		if (distro?.owned) distro.disk.close();
 		throw e;

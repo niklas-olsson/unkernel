@@ -165,6 +165,7 @@ export function start(): void {
 	// Shown in System's Environment list ("Data disk", "Storage") and Settings'
 	// Data disk section; QuotaExceededError and other failed saves are errors.
 	let data: DataAttach | null = null;
+	let dataLockMs: number | null = null;
 	let saveErrorShown = -Infinity, storageFailed = false;
 	function saveError(e: unknown) {
 		storageFailed = true;
@@ -205,28 +206,28 @@ export function start(): void {
 			? `Saved in this browser (IndexedDB ${d.store?.name}): ${fmtSize(d.size)} disk, ${blocks} blocks (${fmtSize(blocks * 4096)}) stored.`
 			: `In memory only: ${data?.notice ?? d.notice ?? "not saved"}.`);
 	}
-	async function openData(module: WebAssembly.Module, size: number | undefined): Promise<BlockDevice[]> {
+	async function openData(template: Uint8Array | undefined, size: number | undefined): Promise<BlockDevice[]> {
 		// Opening IndexedDB, the tab lock, and loading the stored blocks (or seeding from the template).
 		const t0 = performance.now();
 		try {
-			data = await attachDataDisk({ enabled: cfg.data, bundled: bundledBoot(module).datadisk, size, log: dataLog, onError: saveError });
+			data = await attachDataDisk({ enabled: cfg.data, bundled: template, size, log: dataLog, onError: saveError });
 		} catch (e) {
 			data = { disk: null, lock: null, reason: `failed: ${(e as Error).message}` };
 			console.error(e);
 		}
-		const ms = performance.now() - t0;
+		const ms = cfg.data && typeof indexedDB !== "undefined" ? performance.now() - t0 : null;
 		KW.dataDisk = data.disk;
 		const d = data.disk;
 		showData(d ? { size: d.size, seeded: d.seeded, storedBlocks: d.stored.size } : null, ms);
 		return d ? [d] : [];
 	}
 	/** The data disk's rows, boot line and status, inline or (from the worker's snapshot) in worker mode. */
-	function showData(d: { size: number; seeded?: boolean; storedBlocks?: number } | null, ms: number) {
+	function showData(d: { size: number; seeded?: boolean; storedBlocks?: number } | null, ms: number | null) {
 		if (!data) return;
 		if (!d) {
 			ui.check("data", "Data disk", "info", "none", data.reason);
 			ui.dataStatus(`No data disk: ${data.reason}.`);
-			ui.hostLog(`[host] data disk: none (${data.reason}, ${fmtS(ms)})`);
+			ui.hostLog(`[host] data disk: none (${data.reason}${ms === null ? "" : `, ${fmtS(ms)}`})`);
 			if (cfg.data && !/no IndexedDB/.test(data.reason ?? "")) warn(`No data disk: ${data.reason}`, ms);
 			return;
 		}
@@ -239,7 +240,8 @@ export function start(): void {
 		} else {
 			const stored = d.storedBlocks ?? 0;
 			ui.check("data", "Data disk", "pass", `${dev} (${fmtSize(d.size)}), saved in this browser`,
-				`${d.seeded ? `created from the template (${data.from})` : `${stored} blocks stored`}; lock: ${data.lock?.how}; opened in ${fmtS(ms)}` +
+				`${d.seeded ? `created from the template (${data.from})` : `${stored} blocks stored`}; lock: ${data.lock?.how}` +
+				(ms === null ? "" : `; opened in ${fmtS(ms)}`) +
 				(cfg.worker ? "; the kernel worker writes it" : ""));
 			ok(`Attached the data disk ${dev} (${d.seeded ? "new" : `${fmtSize(stored * 4096)} stored`})`, ms);
 			void showStorage({ ask: true });
@@ -256,17 +258,21 @@ export function start(): void {
 		if (!cfg.data) data = { disk: null, lock: null, reason: "off (?data=0)" };
 		else if (typeof indexedDB === "undefined") data = { disk: null, lock: null, reason: "no IndexedDB in this browser" };
 		else {
+			const started = performance.now();
 			const lock = await acquireDiskLock();
+			dataLockMs = performance.now() - started;
 			data = { disk: null, lock, from: "bundled in the kernel" };
 			return [{ kind: "data", template: "bundled", mode: lock.held ? "persistent" : "snapshot", size, optional: true }];
 		}
 		KW.dataDisk = null;
-		showData(null, 0);
+		showData(null, null);
 		return [];
 	}
 	/** Worker mode, once booted: what the worker built (or why not), shown like an inline attach. */
-	function workerDataAttached(w: WorkerKernel, ms: number) {
+	function workerDataAttached(w: WorkerKernel, openMs: number | null) {
 		if (!data?.lock) return; // no spec was sent
+		// The two operations can be far apart in the boot. Sum their measured durations.
+		const ms = dataLockMs === null || openMs === null ? null : dataLockMs + openMs;
 		KW.dataDisk = null; // the CowDisk is in the worker: KW.vm.disks has its state
 		const st = workerData();
 		const skipped = w.skippedDisks.find((d) => d.index === 0);
@@ -1452,6 +1458,7 @@ export function start(): void {
 			}, () => { clearTimeout(settle); unquiet(); });
 		}
 		let dataDisks: BlockDevice[] | DiskSpec[] = [];
+		let workerDataOpenMs: number | null = null;
 		// The data disk's size (?datasize=): a saved disk grows to it only when no suspended session
 		// that has the data disk is waiting, as its kernel knows the disk at the old size (Reboot drops it).
 		// Clamped to the browser's quota for the page: a larger disk would fail its writes once the quota is used up.
@@ -1508,7 +1515,7 @@ export function start(): void {
 				throw tag(e, "distro", "kernel");
 			}
 		}
-		if (!cfg.worker) dataDisks = await openData(module, await dataSize());
+		if (!cfg.worker) dataDisks = await openData(bundle.datadisk, await dataSize());
 
 		await termReady.catch((e: unknown) => { throw tag(e, "terminal", ""); }); // the console needs it (and its size)
 		const memoryStage = () => {
@@ -1598,15 +1605,25 @@ export function start(): void {
 				// that cannot post one (not seen so far; Safari is untested) gets the kernel's
 				// URL instead, absolute because the worker has no base of its own, and the
 				// worker downloads (from the HTTP cache) and compiles it.
-				const inWorker = (kernel: WebAssembly.Module | string) => createKernel({
-					...common, ...glDevices(), worker: true, kernel, compileInWorker: typeof kernel === "string",
-					cpus: smp ? cfg.cpus : undefined, // the worker starts the other CPUs (js/web/cpu.ts)
-					shared: cfg.shared ? undefined : false, // shared memory where the page is cross-origin isolated (?shared=0: never)
-					disks: dataDisks as DiskSpec[], onDiskError: (_i, e) => saveError(e),
-					distro: distro?.url, // a spec the page makes (relative to the page); the worker opens it
-					net: browserNetSpec({ enabled: cfg.net, servers: cfg.wisp, routes: cfg.routes }), // Wisp, in the worker (net.ts)
-					restore, transferRestore: true, // the snapshot is read for this boot only
-				});
+				const inWorker = async (kernel: WebAssembly.Module | string) => {
+					let openMs: number | null = null;
+					const started = await createKernel({
+						...common, ...glDevices(), worker: true, kernel, compileInWorker: typeof kernel === "string",
+						onProgress: (p) => {
+							if (p.stage === "disk" && p.index === 0 && p.kind === "data") openMs = p.ms;
+							onProgress(p);
+						},
+						cpus: smp ? cfg.cpus : undefined, // the worker starts the other CPUs (js/web/cpu.ts)
+						shared: cfg.shared ? undefined : false, // shared memory where the page is cross-origin isolated (?shared=0: never)
+						disks: dataDisks as DiskSpec[], onDiskError: (_i, e) => saveError(e),
+						distro: distro?.url, // a spec the page makes (relative to the page); the worker opens it
+						net: browserNetSpec({ enabled: cfg.net, servers: cfg.wisp, routes: cfg.routes }), // Wisp, in the worker (net.ts)
+						restore, transferRestore: true, // the snapshot is read for this boot only
+					});
+					// Report the successful boot attempt, even if an earlier restore was refused.
+					workerDataOpenMs = openMs;
+					return started;
+				};
 				return cfg.worker
 					? inWorker(module).catch((e: unknown) => {
 						if (!(e instanceof BootError && e.stage === "support" && /cannot send the kernel/.test(e.message))) throw e;
@@ -1698,7 +1715,7 @@ export function start(): void {
 		}
 		if (cfg.worker && vm.distro) showDistro(vm.distro, null);
 		if (vm instanceof WorkerKernel) {
-			workerDataAttached(vm, performance.now() - t0);
+			workerDataAttached(vm, workerDataOpenMs);
 			const shared = vm.transport === "shared";
 			const why = shared ? "the page is cross-origin isolated" : !cfg.shared ? "?shared=0" : "the page is not cross-origin isolated, so it has no SharedArrayBuffer";
 			ui.check("worker-transport", "Worker input and frames", shared ? "pass" : "info", shared ? "shared memory" : "messages",

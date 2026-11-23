@@ -165,10 +165,11 @@ export interface SkippedDisk {
 
 /**
  * Build the disks: objects are passed through, specs built by `registry`
- * in order. Returns the devices and the optional specs left out.
+ * in order. Reports the time each spec took to build on this thread.
+ * Returns the devices and the optional specs left out.
  */
 export async function buildDisks(items: ReadonlyArray<BlockDevice | DiskSpec>, registry: DeviceRegistry | undefined,
-	ctx: Omit<DeviceContext, "index">): Promise<{ disks: BlockDevice[]; skipped: SkippedDisk[] }> {
+	ctx: Omit<DeviceContext, "index">, onDisk: (index: number, kind: string, ms: number) => void): Promise<{ disks: BlockDevice[]; skipped: SkippedDisk[] }> {
 	const disks: BlockDevice[] = [], skipped: SkippedDisk[] = [];
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index]!;
@@ -178,9 +179,14 @@ export async function buildDisks(items: ReadonlyArray<BlockDevice | DiskSpec>, r
 		}
 		const make = registry?.disks[item.kind] as ((s: DiskSpec, c: DeviceContext) => Promise<BlockDevice> | BlockDevice) | undefined;
 		try {
-			checkVersion(item, "disk kind");
-			if (!make) throw new BootError("support", `disk kind "${item.kind}" is not available on this platform`);
-			disks.push(await make(item, { ...ctx, index }));
+			const started = performance.now();
+			try {
+				checkVersion(item, "disk kind");
+				if (!make) throw new BootError("support", `disk kind "${item.kind}" is not available on this platform`);
+				disks.push(await make(item, { ...ctx, index }));
+			} finally {
+				onDisk(index, item.kind, performance.now() - started);
+			}
 		} catch (e) {
 			const reason = (e as Error)?.message ?? String(e);
 			if (!item.optional) throw e instanceof BootError ? e : new BootError("boot", `disk ${index} (${item.kind}): ${reason}`, { cause: e });
