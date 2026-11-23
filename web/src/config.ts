@@ -172,8 +172,11 @@ export const DEFAULT_ROUTES: Readonly<Record<string, string>> = Object.freeze({
 	"deb.debian.org": "https://mirror.unkernel.dev/deb",
 });
 
-/** The project's source, linked from About and the boot notes. */
+/** The upstream project and the page build shown in About and the boot notes. */
 export const REPO = "https://github.com/pithings/unkernel";
+export const FORK_REPO = __KW_BUILD__.repo.toLowerCase() === REPO.toLowerCase() ? "" : __KW_BUILD__.repo;
+export const PAGE_COMMIT = __KW_BUILD__.commit.slice(0, 7) + (__KW_BUILD__.dirty ? "-dirty" : "");
+export const PAGE_COMMIT_URL = __KW_BUILD__.repo && __KW_BUILD__.commit ? `${__KW_BUILD__.repo}/commit/${__KW_BUILD__.commit}` : "";
 
 /** The data disk sizes Settings offers, in GiB; the first is the default (the template's size). */
 export const DATA_SIZES: readonly number[] = [4, 8, 16, 32, 64];

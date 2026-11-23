@@ -78,9 +78,10 @@ their top):
   dialogs, the Resume card, the toast), `icons.tsx`.
 
 `src/env.d.ts` declares `__KW_BUILD__`,
-which `vite.config.ts` defines: the Linux release read from the committed
-kernel's banner, the kernel's release tag and the page's commit (empty
-where git is missing or the clone is too shallow). `web/public/vm-sw.js` is the page's
+which `vite.config.ts` defines from the base bundle's Linux banner, the kernel's
+release tag and the page checkout's repository and revision. GitHub Actions
+and Vercel can supply the repository and commit when Git metadata is missing.
+`web/public/vm-sw.js` is the page's
 service worker (the preview's relay), `web/public/vm-ws.js` the preview's WebSocket shim, `web/server/vm.ts` the preview's server fallback,
 `web/server/distros.ts` the built Node server's `/distros/` handler and
 `web/server/range.ts` the Range logic it shares with the dev server,
@@ -495,11 +496,12 @@ deploying the page needs no kernel toolchain.
   written in full. Once user space prints, "Started Linux" (the kernel until
   it runs `/init`), "Started Alpine" (the base mounting the image and the
   distro's init; "Started the base shell" without one), the "Booted
-  in" summary, two notes (the repository as an OSC 8 link, and how to
-  open the app launcher; not on a resumed session), with Pip from the
-  logo (`assets/logo.svg`) in truecolor half blocks to their left when
-  the terminal is wide enough, and the buffered
-  user-space output follow; nothing is scrolled away or erased. The desktop test checks the order.
+  in" summary and fresh-boot notes follow. The notes link to the upstream
+  source, then the fork and its page commit when known, and give the app
+  launcher shortcut. Pip from the logo (`assets/logo.svg`) appears in
+  truecolor half blocks on the left when the terminal is wide enough. The
+  buffered user-space output follows, preserving the boot transcript.
+  The desktop test checks the order.
 - wterm (`@wterm/dom`, Apache-2.0; xterm.js was dropped because its touch
   scrolling had no momentum) renders rows as DOM text, and `#term` (and
   each `.term-pty`) is itself the scroll container, so it must not set

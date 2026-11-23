@@ -63,18 +63,32 @@ const git = (...args: string[]) => {
 	catch { return ""; }
 };
 
+/** Convert a GitHub remote to an HTTPS link containing only its owner and repository. */
+function githubRepository(remote: string): string {
+	const url = URL.parse(remote.replace(/^git@github\.com:/i, "https://github.com/"));
+	if (url?.hostname.toLowerCase() !== "github.com") return "";
+	const repo = url.pathname.replace(/\/$/, "").replace(/\.git$/i, "");
+	return /^\/[\w-]+\/[\w.-]+$/.test(repo) ? `https://github.com${repo}` : "";
+}
+
 /**
- * __KW_BUILD__ (src/env.d.ts), shown in the About dialog: the Linux release
- * from the base bundle's banner, the kernel's release tag ("local" for a
- * local build) and the page's commit. Empty where unknown (no git).
+ * __KW_BUILD__ (src/env.d.ts) identifies the kernel bundle and the checkout
+ * used to build the page. Hosted builds can supply the latter without Git.
  */
 async function buildInfo(dev: boolean) {
 	const s = await pageSource(dev);
 	const [commit = "", date = ""] = git("log", "-1", "--format=%H %cI").split(" ");
+	const env = process.env;
+	const { VERCEL_GIT_REPO_OWNER: owner, VERCEL_GIT_REPO_SLUG: name, VERCEL_GIT_PROVIDER: provider } = env;
+	const vercelRepo = owner && name && (!provider || provider === "github") ? `https://github.com/${owner}/${name}` : "";
+	const actionsRepo = `${env.GITHUB_SERVER_URL || "https://github.com"}/${env.GITHUB_REPOSITORY || ""}`;
+	const sha = commit || env.VERCEL_GIT_COMMIT_SHA || env.GITHUB_SHA || "";
 	return {
 		linux: s.linux,
 		kernel: s.kernel.tag,
-		commit: commit || process.env.VERCEL_GIT_COMMIT_SHA || "",
+		repo: githubRepository(git("config", "--get", "remote.origin.url")) || githubRepository(vercelRepo) || githubRepository(actionsRepo),
+		commit: /^[0-9a-f]{7,64}$/i.test(sha) ? sha : "",
+		dirty: !!commit && !!git("status", "--porcelain"),
 		date,
 	};
 }

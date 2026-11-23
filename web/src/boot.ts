@@ -28,7 +28,7 @@ import { prefetchApkIndexes } from "./apk.ts";
 import { createAudioOut } from "./audio.ts";
 import { autoHide } from "./autohide.ts";
 import { AUTO_SUSPEND_HOLD_MS, AutoSuspend, AutoSuspendSkip, LEAVE_OFFER_MS, LEAVE_STAYED_MS, Pause, SuspendSaveError, allowLeave, autoSuspendLabel, pageLeaving, quietStart, resumeAskedFor, resumeChoice, resumedNote, sessionRoom, wantLeavePrompt, type SuspendFacts } from "./autosuspend.ts";
-import { CPUS_ONCE_KEY, GL_DISTROS, INLINE_ONCE_KEY, REPO, UP_ONCE_KEY, dataSizeCap } from "./config.ts";
+import { CPUS_ONCE_KEY, FORK_REPO, GL_DISTROS, INLINE_ONCE_KEY, PAGE_COMMIT, PAGE_COMMIT_URL, REPO, UP_ONCE_KEY, dataSizeCap } from "./config.ts";
 import { attachDataDisk, detachDataDisk, downloadKwsparse, exportDataDisk, importDataDisk, resetDataDisk, storageState, acquireDiskLock, type DataAttach } from "./data.ts";
 import { createDisplayUi } from "./display.ts";
 import { isPageChrome, ownsKeys } from "./focus.ts";
@@ -503,11 +503,17 @@ export function start(): void {
 	// Each step already shows its own time: the summary is the total from page load.
 	const summary = () => `${SGR.dim}Booted in${SGR.off} ${SGR.bold}${fmtS(Date.now() - KW.t0)}${SGR.off}` +
 		(smp ? ` ${SGR.dim}on ${cfg.cpus} CPUs${SGR.off}` : cfg.worker ? ` ${SGR.dim}in a Web Worker${SGR.off}` : "") + "\r\n";
-	// Two lines under the summary of a fresh boot: the source (an OSC 8 link,
-	// which wterm opens on Ctrl/⌘-click) and how to open the app launcher.
+	// wterm opens these OSC 8 links on Ctrl/⌘-click.
 	const link = (url: string, text: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
-	const notes = () => [`${SGR.dim}Source${SGR.off}  ${link(REPO, REPO.replace(/^https:\/\//, ""))}`,
-		`${SGR.dim}Apps${SGR.off}    ${cfg.coarse ? "tap the grid in the Dock" : `press ${SGR.bold}${APPLE ? "⌘ K" : `${CHORD}-O`}${SGR.off}`}`];
+	const notes = () => {
+		const lines = [`${SGR.dim}Source${SGR.off}  ${link(REPO, REPO.replace(/^https:\/\//, ""))}`];
+		if (FORK_REPO) {
+			const label = FORK_REPO.replace(/^https:\/\//, "") + (PAGE_COMMIT ? `@${PAGE_COMMIT}` : "");
+			lines.push(`${SGR.dim}Fork${SGR.off}    ${link(PAGE_COMMIT_URL || FORK_REPO, label)}`);
+		}
+		lines.push(`${SGR.dim}Apps${SGR.off}    ${cfg.coarse ? "tap the grid in the Dock" : `press ${SGR.bold}${APPLE ? "⌘ K" : `${CHORD}-O`}${SGR.off}`}`);
+		return lines;
+	};
 	// Pip, glimmer's seed and the logo (assets/logo.svg), left of the summary
 	// and the notes; left out where the lines would wrap.
 	const PIP_W = PIP.width + 2; // with the gap before the text
@@ -515,7 +521,8 @@ export function start(): void {
 	const intro = () => {
 		const lines = [summary().replace(/\r\n$/, ""), ...notes()];
 		if (term.cols < PIP_W + Math.max(...lines.map(visible)) + 1) return lines.join("\r\n") + "\r\n";
-		return ["", ...lines].map((s, i) => `${PIP[i]}  ${s}`).join("\r\n") + "\r\n";
+		while (lines.length < PIP.length) lines.unshift("");
+		return lines.map((s, i) => `${PIP[i] ?? " ".repeat(PIP.width)}  ${s}`).join("\r\n") + "\r\n";
 	};
 	// The command line is shown only when it is not the default one.
 	const cmdlineNote = () => (cfg.cmdlineGiven ? `: ${SGR.dim}${cfg.cmdline}${SGR.off}` : "");

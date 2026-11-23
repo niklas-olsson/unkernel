@@ -2,14 +2,17 @@
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // Build-time constants from vite.config.ts (define).
 
-/** The About dialog's build details; empty strings where unknown. */
+/** Build details for the boot screen and About dialog. Empty strings where unknown. */
 declare const __KW_BUILD__: {
 	/** Linux release from the base bundle's banner (7.3.4+). */
 	linux: string;
 	/** The kernel's GitHub release tag (web/scripts/kernel.ts pageSource()), or "local" (a local build: KW_KERNEL, KW_DISTROS or auto-detected). */
 	kernel: string;
-	/** The page's commit hash and its date (ISO 8601). */
+	/** Canonical GitHub URL of the checkout used to build the page. */
+	repo: string;
+	/** The page's commit hash, local changes and commit date (ISO 8601). */
 	commit: string;
+	dirty: boolean;
 	date: string;
 };
 

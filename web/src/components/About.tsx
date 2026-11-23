@@ -8,7 +8,7 @@
 // open (openAbout()).
 import type { ReactNode } from "react";
 import { openSection } from "../sysapps.ts";
-import { REPO } from "../config.ts";
+import { FORK_REPO, PAGE_COMMIT, PAGE_COMMIT_URL, REPO } from "../config.ts";
 import { useStore } from "../store.ts";
 import { Triangle } from "./icons.tsx";
 
@@ -36,16 +36,16 @@ export function openAbout(): void {
 
 /** The build and the credits (Settings' About section). */
 export function AboutInfo() {
-	const commit = B.commit.slice(0, 7);
 	const distro = useStore((s) => s.distro);
 	return (
 		<div id="about" className="leading-relaxed select-text">
 			<p className="text-muted"><b className="font-semibold text-fg">unkernel</b>: Linux compiled to WebAssembly, running unmodified aarch64 user space in your browser tab.</p>
 			<dl className="mt-4 grid grid-cols-[8ch_1fr] gap-x-4 gap-y-1 tabular-nums">
 				<Row k="source"><A href={REPO}>github.com/pithings/unkernel</A></Row>
+				{FORK_REPO && <Row k="fork"><A href={FORK_REPO}>{FORK_REPO.replace(/^https:\/\//, "")}</A></Row>}
 				<Row k="kernel">Linux {B.linux || "?"}{B.kernel && <span className="text-faint">, {B.kernel === "local" ? "local build" : <A href={`${REPO}/releases/tag/${B.kernel}`}>{B.kernel}</A>}</span>}</Row>
 				<Row k="distro">{distro ? <>{distro.image || distro.name}<span className="text-faint">, {distro.url}</span></> : "none (base shell)"}</Row>
-				<Row k="commit">{commit ? <A href={`${REPO}/commit/${B.commit}`}>{commit}</A> : "dev"}{B.date && <span className="text-faint">, {day(B.date)}</span>}</Row>
+				<Row k="commit">{PAGE_COMMIT_URL ? <A href={PAGE_COMMIT_URL}>{PAGE_COMMIT}</A> : PAGE_COMMIT || "dev"}{B.date && <span className="text-faint">, {day(B.date)}</span>}</Row>
 			</dl>
 			<p className="mt-4 text-[12px] text-muted">
 				Built on <A href="https://kernel.org/">Linux</A>, <A href="https://github.com/joelseverin/linux-wasm">linux-wasm</A>,{" "}
