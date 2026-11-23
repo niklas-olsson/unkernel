@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createKernel, createImageFromKwsparse, bundledBoot, decodeSnapshot, encodeSnapshot, openDistroDisk, snapshotDiskMismatch } from "../js/node.ts";
+import { desktopEntryCommand, listDesktopEntries } from "../web/src/desktop-entries.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const kernelFile = path.resolve(process.env.UNKERNEL_TEST_BASE_KERNEL ?? path.join(root, "vendor/build/bundle/unkernel.wasm"));
@@ -81,6 +82,25 @@ for (const name of ["alpine", "debian"]) {
 			t.after(() => vm.stop({ reason: "test cleanup" }));
 			return vm;
 		};
+
+		test("the launcher discovers a nested desktop entry and runs it as the guest user", async (t) => {
+			const vm = await boot(t, { distro: img!.file });
+			await sh(vm, `mkdir -p ~/.local/share/applications/tools && cat > ~/.local/share/applications/tools/user.desktop <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Show user
+Exec=/usr/bin/id -u
+Terminal=true
+ENTRY`);
+			const catalog = await listDesktopEntries(vm);
+			const app = catalog.apps.find((entry) => entry.id === "tools-user.desktop");
+			assert.ok(app, "the guest's find and awk enumerate nested desktop entries");
+			const command = desktopEntryCommand(app);
+			const result = await vm.exec(command.file, command.args, EXEC);
+			assert.equal(result.exitCode, 0, result.stderr);
+			assert.equal(result.stdout.trim(), "1000");
+			assert.equal(await listDesktopEntries(vm, catalog), catalog);
+		});
 
 		test("boots through the SDK: exec() (the base's kwtty), /usr/lib/kw-distro, an overlay root, a read-only /dev/wda", async (t) => {
 			const vm = await boot(t, { distro: img!.file });

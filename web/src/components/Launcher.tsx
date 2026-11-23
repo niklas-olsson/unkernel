@@ -57,7 +57,9 @@ import {
 	useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent,
 	type ReactNode, type RefObject,
 } from "react";
-import { GROUPS } from "../apps/index.ts";
+import { GROUPS, APPS } from "../apps/index.ts";
+import { waylandApp } from "../appwindows.ts";
+import { desktopEntryCommand, listDesktopEntries, type DesktopEntry, type DesktopEntryCatalog } from "../desktop-entries.ts";
 import { isPageApp, type App, type AppIcon } from "../apps/types.ts";
 import { reducedMotion, useLongPress } from "../hooks.ts";
 import { useInstalls, type Install } from "../installer.ts";
@@ -65,7 +67,8 @@ import { KW } from "../kw.ts";
 import { appPackages, launch, setLauncher, unavailable } from "../launcher.ts";
 import { PREFIX } from "../keys.ts";
 import { canPin, canPinGroup, isPinned, pin, unpin, usePins, type PinTarget } from "../pins.ts";
-import { isStopped, useStore } from "../store.ts";
+import type { KernelHandle } from "../sdk.ts";
+import { isHeld, isRunning, isStopped, ui$, useStore } from "../store.ts";
 import { useTermTabs } from "../termtabs.ts";
 import { useWm } from "../wm.ts";
 import { AppGlyph, SearchIcon } from "./icons.tsx";
@@ -74,7 +77,8 @@ import { Menu, type MenuClose, type MenuEntry } from "./Menu.tsx";
 
 /** An app's tile. */
 interface Tile {
-	app: App;
+	app?: App;
+	open(): void;
 	id: string;
 	title: string;
 	desc: string;
@@ -103,6 +107,51 @@ interface Folder {
 	off: boolean;
 }
 type Entry = { tile: Tile; folder?: undefined } | { folder: Folder; tile?: undefined };
+
+const INSTALLED = { id: "installed", title: "Installed Apps", desc: "Applications installed in the guest" };
+/** Root timestamps cover package installs. Occasionally re-read nested or edited files too. */
+const RESCAN_MS = 60_000;
+interface AppScan {
+	catalog?: DesktopEntryCatalog;
+	lastFull: number;
+	pending?: Promise<DesktopEntryCatalog>;
+}
+const scans = new WeakMap<KernelHandle, AppScan>();
+
+function scan(vm: KernelHandle): Promise<DesktopEntryCatalog> {
+	let current = scans.get(vm);
+	if (!current) scans.set(vm, (current = { lastFull: -Infinity }));
+	const cache = current;
+	const previous = performance.now() - cache.lastFull < RESCAN_MS ? cache.catalog : undefined;
+	return cache.pending ??= listDesktopEntries(vm, previous).then((catalog) => {
+		if (catalog !== previous) cache.lastFull = performance.now();
+		cache.catalog = catalog;
+		return catalog;
+	}).finally(() => { cache.pending = undefined; });
+}
+
+function curated(entry: DesktopEntry): App | undefined {
+	const id = entry.id.slice(0, -".desktop".length);
+	const app = waylandApp(id) ?? APPS.find((a) => a.id.toLowerCase() === id.toLowerCase()) ?? waylandApp(entry.startupClass);
+	return app?.hidden ? undefined : app;
+}
+
+async function openInstalled(vm: KernelHandle, app: DesktopEntry): Promise<void> {
+	const state = ui$().get();
+	if (KW.vm !== vm || !KW.windows || !isRunning(state) || isHeld(state)) {
+		KW.ui?.toast("Installed apps open while the guest is running");
+		return;
+	}
+	if (!app.terminal && !state.wayland.available) {
+		KW.ui?.toast(`${app.title} needs the Wayland desktop`);
+		return;
+	}
+	try {
+		await KW.windows.open({ name: app.title, ...desktopEntryCommand(app), window: app.terminal ? "new" : undefined });
+	} catch (e) {
+		if (KW.vm === vm && isRunning(ui$().get())) KW.ui?.toast(`${app.title}: ${(e as Error)?.message ?? e}`);
+	}
+}
 
 const GRAY: [string, string] = ["#52525b", "#18181b"];
 const GROUP_TITLE = new Map(GROUPS.map((g) => [g.id, g.title]));
@@ -198,7 +247,7 @@ function Cell({ e, idx, on, onPick, onHover, onMenu }: { e: Entry; idx: number; 
 			{/* Running: a dot under the title, as in the Dock. */}
 			<span aria-hidden="true" className={`-mt-0.5 size-1 rounded-full ${running ? "bg-white/80" : "bg-transparent"}`} />
 			<span className="sr-only">
-				{f ? `, folder, ${f.tiles.length} apps${f.running ? ", one running" : ""}` : t!.running ? `, ${t!.running}` : ""}
+				{f ? `, folder, ${f.tiles.length} app${f.tiles.length === 1 ? "" : "s"}${f.running ? ", one running" : ""}` : t!.running ? `, ${t!.running}` : ""}
 			</span>
 		</button>
 	);
@@ -262,7 +311,7 @@ function FolderLayer({ f, leaving, listRef, onClose, onGone, children }: {
 				</h2>
 				<div ref={panel} className="rounded-[2rem] border border-white/10 bg-neutral-900/60 p-3 shadow-[0_24px_80px_rgba(0,0,0,.6),inset_0_1px_0_rgba(255,255,255,.06)] backdrop-blur-2xl sm:p-5">
 					<div ref={listRef} id="launcher-folder" role="listbox" aria-label={f.title}
-						className={`grid gap-y-3 sm:gap-y-5 ${f.tiles.length > 9 ? "grid-cols-3 sm:grid-cols-4" : "grid-cols-3"}`}>
+						className={`grid gap-y-3 sm:gap-y-5 ${f.tiles.length > 9 ? "grid-cols-3 sm:grid-cols-4" : "grid-cols-3"} ${f.id === INSTALLED.id ? "max-h-[60dvh] overflow-y-auto overscroll-contain" : ""}`}>
 						{children}
 					</div>
 				</div>
@@ -277,6 +326,23 @@ export function Launchpad() {
 }
 
 function Pad() {
+	const canScan = useStore((s) => isRunning(s) && !isHeld(s));
+	const wayland = useStore((s) => s.wayland.available);
+	const vm = canScan ? KW.vm as KernelHandle | undefined : undefined;
+	const [installed, setInstalled] = useState<{ vm: KernelHandle; apps: DesktopEntry[] } | null>(null);
+	const [scanFailed, setScanFailed] = useState(false);
+	const entries = vm && (installed?.vm === vm ? installed.apps : scans.get(vm)?.catalog?.apps);
+	useEffect(() => {
+		setInstalled(null);
+		setScanFailed(false);
+		if (!vm) return;
+		let active = true;
+		void scan(vm).then(
+			({ apps }) => { if (active && KW.vm === vm) setInstalled({ vm, apps }); },
+			() => { if (active && KW.vm === vm) setScanFailed(true); },
+		);
+		return () => { active = false; };
+	}, [vm]);
 	const stopped = useStore(isStopped);
 	const terms = useTermTabs((s) => s.terms);
 	const windows = useWm((s) => s.windows);
@@ -318,13 +384,29 @@ function Pad() {
 				: why ? `${a.title}: ${why}` : running ? `${a.title}: ${running}, shows it`
 				: page ? `${a.title}: ${a.desc}` : `${a.desc}${pkgs.length ? `\nInstalls: ${pkgs.join(" ")}` : ""}\nRuns: ${a.commands.join("; ")}`;
 			return {
-				app: a, id: a.id, title: a.title, desc: a.desc, icon: a.icon ?? a.title[0]!.toUpperCase(), colors: a.colors ?? GRAY,
+				app: a, open: () => { void launch(a); }, id: a.id, title: a.title, desc: a.desc, icon: a.icon ?? a.title[0]!.toUpperCase(), colors: a.colors ?? GRAY,
 				why, running, tip, group: GROUP_TITLE.get(a.group) ?? "", install,
 			};
 		};
 		const pinned: Entry[] = [], folders: Folder[] = [], all: Tile[] = [];
+		const replaced = new Set<App>();
+		const guestTiles = entries?.flatMap((app): Tile[] => {
+			const why = !app.terminal && !wayland ? "needs the Wayland desktop" : null;
+			const recipe = curated(app);
+			if (recipe) {
+				if (why || !unavailable(recipe)) return [];
+				replaced.add(recipe);
+			}
+			const desc = app.description || (app.terminal ? "Opens in Terminal" : "Installed in the guest");
+			return [{
+				id: `installed-${encodeURIComponent(app.id)}`, title: app.title, desc,
+				icon: Array.from(app.title)[0]!.toUpperCase(), colors: GRAY, group: INSTALLED.title,
+				why, running: null, tip: why ? `${app.title}: ${why}` : desc,
+				open: () => { void openInstalled(vm!, app); },
+			}];
+		}) ?? [];
 		for (const g of GROUPS) {
-			const tiles = g.apps.filter((a) => !a.hidden).map(tileOf);
+			const tiles = g.apps.filter((a) => !a.hidden && !replaced.has(a)).map(tileOf);
 			if (!tiles.length) continue;
 			all.push(...tiles);
 			if (g.inline) pinned.push(...tiles.map((tile) => ({ tile })));
@@ -333,8 +415,12 @@ function Pad() {
 				running: tiles.some((t) => t.running), off: tiles.every((t) => t.why),
 			});
 		}
+		if (guestTiles.length) {
+			all.push(...guestTiles);
+			folders.push({ ...INSTALLED, icon: "A", colors: GRAY, tiles: guestTiles, running: false, off: guestTiles.every((t) => t.why) });
+		}
 		return { top: [...pinned, ...folders.map((f): Entry => ({ folder: f }))], folders, all };
-	}, [stopped, terms, windows, installs]);
+	}, [stopped, terms, windows, installs, entries, vm, wayland]);
 
 	const results = q ? all.filter((t) => matches(t, q)).map((tile): Entry => ({ tile })) : null;
 	const opened = folders.find((f) => f.id === folder);
@@ -373,7 +459,7 @@ function Pad() {
 		if (e.folder) return openFolder(e.folder.id, idx);
 		if (e.tile.why) { setSel(idx); setHint(true); return; }
 		setLauncher(false);
-		void launch(e.tile.app);
+		e.tile.open();
 	};
 	/** The focus back where the launcher keeps it: the search field, on touch the overlay. */
 	const refocus = () => (coarse ? root.current : input.current)?.focus({ preventScroll: true });
@@ -387,7 +473,7 @@ function Pad() {
 	const dockItem = (t: PinTarget): MenuEntry => (isPinned(t) ? { label: "Remove from Dock", run: () => unpin(t) } : { label: "Keep in Dock", run: () => pin(t) });
 	/** An app's menu: Open (closes the launcher), then Keep in Dock or Remove from Dock. */
 	const menuItems = (t: Tile): MenuEntry[] => {
-		const items: MenuEntry[] = [{ label: "Open", disabled: !!t.why, run: () => { setLauncher(false); void launch(t.app); } }];
+		const items: MenuEntry[] = [{ label: "Open", disabled: !!t.why, run: () => { setLauncher(false); t.open(); } }];
 		if (canPin(t.app)) items.push(null, dockItem({ app: t.app }));
 		return items;
 	};
@@ -490,7 +576,8 @@ function Pad() {
 		<Cell key={optId(e)} e={e} idx={idx} on={hint && e === cur} onHover={() => setSel(idx)} onPick={() => pick(e, idx)}
 			onMenu={(at) => openMenu(e, at, idx)} />
 	));
-	const line = !cur ? "" : cur.folder ? cur.folder.tiles.map((t) => t.title).join(" · ")
+	const scanMessage = scanFailed ? "Could not read installed apps. Reopen Apps to retry." : "";
+	const line = !cur ? "" : cur.folder ? (cur.folder.id === INSTALLED.id ? cur.folder.desc : cur.folder.tiles.map((t) => t.title).join(" · "))
 		: cur.tile.why ? `${cur.tile.title}: ${cur.tile.why}` : `${cur.tile.desc}${cur.tile.running ? ` · ${cur.tile.running}: ↵ shows it` : ""}`;
 
 	return (
@@ -518,12 +605,14 @@ function Pad() {
 					className={`grid w-full content-start gap-x-1 gap-y-4 sm:mt-[4vh] sm:gap-y-6 ${results ? "max-w-[34rem] grid-cols-4 sm:max-w-[42rem] sm:grid-cols-5" : "max-w-[34rem] grid-cols-4"}`}
 				>
 					{cells(results ?? top)}
-					{results && !results.length && <p className="col-span-full pt-6 text-center text-white/60">Nothing matches “{query.trim()}”.</p>}
+					{results && !results.length && <p className="col-span-full pt-6 text-center text-white/60">
+						{vm && !entries && !scanFailed ? "Looking for installed apps…" : `Nothing matches “${query.trim()}”.`}
+					</p>}
 				</div>
 			</div>
-			<p aria-live="polite" className={`pointer-events-none relative z-20 min-h-[2.75rem] w-[min(36rem,calc(100%-32px))] flex-none pt-2 text-center text-[12px] text-white/60 ${hint ? "" : "invisible"}`}>
-				<span className="block truncate">{line}</span>
-				<span className="mt-1 block font-mono text-[11px] text-white/40 max-sm:hidden">
+			<p aria-live="polite" className={`pointer-events-none relative z-20 min-h-[2.75rem] w-[min(36rem,calc(100%-32px))] flex-none pt-2 text-center text-[12px] text-white/60 ${hint || scanMessage ? "" : "invisible"}`}>
+				<span className={scanMessage ? "block" : "block truncate"}>{scanMessage || line}</span>
+				<span className={`mt-1 block font-mono text-[11px] text-white/40 max-sm:hidden ${hint ? "" : "invisible"}`}>
 					↵ open · arrows select · esc {folder ? "back" : "close"}
 					{!coarse && <>
 						{" · "}

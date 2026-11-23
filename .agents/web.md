@@ -1794,15 +1794,19 @@ runs): an overlay in the manner of the iOS home screen, the page blurred
 behind a search field and a grid: the page's own apps first (Terminal,
 Settings, System: the inline `system` group), then a folder per group,
 whose face is a fan of its first apps' icons and which opens in place
-(`#launcher-folder`). Typing searches every app in one flat grid. The
-focus stays in the field (tiles take none), so display.ts never routes
+(`#launcher-folder`). The Installed Apps folder adds applications from the
+guest's desktop entries. Typing searches curated and installed apps in
+one flat grid. On reopening, the launcher shows the cached list while it
+checks the guest's application directories and package database for changes.
+An unchanged list is read again on reopen after a minute, which also
+picks up entries edited in place. The focus stays in the field (tiles take none), so display.ts never routes
 its keys to a program holding the guest's keyboard; arrows select, Enter
 opens a folder or runs an app, Esc closes the folder, then clears the
 search, then closes the launcher; a click on the backdrop closes it. On
 touch devices the field is not focused. A tile's or a folder's menu (a
 right click, a long press, the ContextMenu key or Shift-F10;
-`#launcher-menu`) has Open, and Keep in Dock or Remove from Dock (the app,
-or the folder's group). A running app (a terminal named after it, or a
+`#launcher-menu`) has Open. Curated apps and groups also offer Keep in Dock
+or Remove from Dock. A running curated app (a terminal named after it, or a
 page app's open window) has a dot under its tile, and picking it shows
 that window: an app runs once at a time. One being installed has a bar,
 and picking it shows its installer. One the page cannot run
@@ -1811,7 +1815,7 @@ by the page's options, or `packages` that leave out this boot's distro)
 is dimmed, with why. An app with `hidden` set is left out (Browser, which
 opens by itself, among them).
 
-The apps are in `src/apps/` (`apps/types.ts`, described at its top): one
+The curated apps are in `src/apps/` (`apps/types.ts`, described at its top): one
 file per app in its group's folder, whose `index.ts` declares the group
 with `defineGroup()` (title, icon, colours; `inline`: at the top level)
 and lists its apps in order; `apps/index.ts` lists the groups (`GROUPS`)
