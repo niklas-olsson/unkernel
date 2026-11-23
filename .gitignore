@@ -10,3 +10,4 @@ web/.vercel/
 web/kernel/
 web/public/distros/
 tmp/
+/.fork-planning/
