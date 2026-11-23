@@ -6,18 +6,17 @@
 // The guest's kwnet device exchanges raw Ethernet frames with the host. This
 // module terminates them: it answers ARP for the virtual subnet, runs a tiny
 // DHCP server and DNS server, answers pings to the gateway, and terminates
-// TCP connections, bridging each one to a pluggable backend (NetBackend:
+// TCP connections and outbound UDP through a pluggable backend (NetBackend:
 // real sockets in Node, node/net.ts; a Wisp server, net-wisp.ts; or any
 // other transport).
 //
 //   10.0.2.0/24   virtual subnet
-//   10.0.2.2      gateway (TCP to it goes to the host's loopback if the
-//                 backend allows it)
+//   10.0.2.2      gateway (hostLoopback maps it to the backend's loopback)
 //   10.0.2.3      DNS server (A queries resolved by the backend)
 //   10.0.2.15     the guest (handed out by DHCP)
 //
-// Not implemented: IPv6, IP fragments, UDP other than DHCP/DNS (answered with
-// ICMP port unreachable), ICMP other than echo to the gateway/DNS address,
+// Not implemented: IPv6, IP fragments, unsolicited inbound connections,
+// ICMP other than echo to the gateway/DNS address and port unreachable,
 // TCP options beyond MSS and window scale (no SACK, no timestamps).
 
 import type { Kernel, NetDevice } from "./kernel.ts";
@@ -49,8 +48,16 @@ export interface NetConnection {
 	readonly buffered: number;
 }
 
+/** One remote IPv4 endpoint. Each send and onData is a separate datagram. */
+export interface NetDatagramSocket {
+	send(data: Uint8Array): void;
+	close(): void;
+}
+
+export type NetDatagramEvents = Pick<NetConnectionEvents, "onData" | "onClose">;
+
 /**
- * Transport for the guest's TCP connections and DNS lookups.
+ * Transport for the guest's TCP connections, DNS lookups and optional UDP datagrams.
  *
  *   connect({ host, port }, events) -> NetConnection
  *   lookup(name) -> IPv4 dotted quads; reject with { code: "ENOTFOUND" }
@@ -59,6 +66,8 @@ export interface NetConnection {
  */
 export interface NetBackend {
 	connect(addr: { host: string; port: number }, ev: NetConnectionEvents): NetConnection;
+	/** Optional outbound UDP. Returning undefined refuses this destination. */
+	openUdp?(addr: { host: string; port: number }, ev: NetDatagramEvents): NetDatagramSocket | undefined;
 	lookup(name: string): Promise<string[]>;
 	close?(): void;
 }
@@ -66,7 +75,7 @@ export interface NetBackend {
 export interface NetStackOptions {
 	backend: NetBackend;
 	log?: (msg: string) => void;
-	/** TCP to the gateway (10.0.2.2) goes to 127.0.0.1. Default false. */
+	/** Map the gateway (10.0.2.2) to 127.0.0.1 at the backend. Default false. */
 	hostLoopback?: boolean;
 	/** MTU advertised by DHCP (option 26). */
 	mtu?: number;
@@ -84,6 +93,13 @@ export interface NetStats {
 const ETH_ARP = 0x0806, ETH_IP = 0x0800;
 const PROTO_ICMP = 1, PROTO_TCP = 6, PROTO_UDP = 17;
 const FIN = 1, SYN = 2, RST = 4, PSH = 8, ACK = 16;
+const UDP_IDLE_MS = 120_000, MAX_UDP_FLOWS = 128, MAX_UDP_PAYLOAD = 65535 - 20 - 8;
+const MAX_UDP_RX_FRAMES = 64;
+
+interface UdpFlow {
+	socket?: NetDatagramSocket;
+	active: number;
+}
 
 export const ip4 = (s: string): number => s.split(".").reduce((a, b) => ((a << 8) | Number(b)) >>> 0, 0);
 export const ip4str = (n: number): string => `${n >>> 24}.${(n >>> 16) & 255}.${(n >>> 8) & 255}.${n & 255}`;
@@ -433,8 +449,8 @@ class TcpConn implements TcpEndpoint {
 
 /**
  * The host end of the guest's network: pass it as the kernel's `net`
- * (kwnet) device. Terminates the guest's frames and bridges TCP and DNS to
- * `opts.backend`.
+ * (kwnet) device. Terminates the guest's frames and forwards connections
+ * and DNS queries to `opts.backend`.
  */
 export class NetStack implements NetDevice {
 	backend: NetBackend;
@@ -451,6 +467,9 @@ export class NetStack implements NetDevice {
 	dns: number;
 	guest: number;
 	tcp: Map<string, TcpConn>;
+	private udp = new Map<string, UdpFlow>();
+	private udpTimer?: ReturnType<typeof setInterval>;
+	private rxQueue?: readonly Uint8Array[];
 	ipId: number;
 	/** Where frames for the guest go (set by attach()). */
 	output: (frame: Uint8Array) => void;
@@ -476,7 +495,8 @@ export class NetStack implements NetDevice {
 	}
 
 	/** Hook up to a Kernel (core/kernel.ts); called when the guest's driver initialises. */
-	attach(kernel: Kernel): void {
+	attach(kernel: Pick<Kernel, "receiveFrame" | "netRx">): void {
+		this.rxQueue = kernel.netRx;
 		this.output = (frame) => kernel.receiveFrame(frame);
 	}
 
@@ -490,9 +510,10 @@ export class NetStack implements NetDevice {
 		}
 	}
 
-	/** Reset every TCP connection (the backend stays usable). */
+	/** Reset the connections and UDP mappings (the backend stays usable). */
 	close(): void {
 		for (const c of [...this.tcp.values()]) c.close();
+		for (const key of this.udp.keys()) this.closeUdp(key);
 	}
 
 	emit(frame: Uint8Array): void {
@@ -616,19 +637,86 @@ export class NetStack implements NetDevice {
 		this.emit(r);
 	}
 
-	// --- UDP: DHCP and DNS -------------------------------------------------------
+	// --- UDP --------------------------------------------------------------------
+
+	private closeUdp(key: string): void {
+		const flow = this.udp.get(key);
+		this.udp.delete(key);
+		flow?.socket?.close();
+		if (!this.udp.size) {
+			clearInterval(this.udpTimer);
+			this.udpTimer = undefined;
+		}
+	}
+
+	/** Open a mapping for one guest socket and peer. Only that peer can reply. */
+	private udpFlow(key: string, host: string, src: number, sport: number, dst: number, dport: number,
+		quote: Uint8Array, l4: number): UdpFlow | undefined {
+		const flow: UdpFlow = { active: performance.now() };
+		this.udp.set(key, flow);
+		const failed = () => {
+			if (this.udp.get(key) !== flow) return;
+			this.closeUdp(key);
+			this.icmpUnreachable(quote, l4, src, dst, 3);
+		};
+		try {
+			const socket = this.backend.openUdp!({ host, port: dport }, {
+				onData: (data) => {
+					if (this.udp.get(key) !== flow || data.length > MAX_UDP_PAYLOAD) return;
+					flow.active = performance.now();
+					// A busy guest may stop draining Ethernet. Leave room for TCP and control packets.
+					if (this.rxQueue && this.rxQueue.length >= MAX_UDP_RX_FRAMES) return;
+					this.sendUdp(dst, dport, src, sport, data);
+				},
+				onClose: (error) => {
+					if (error) failed();
+					else if (this.udp.get(key) === flow) this.closeUdp(key);
+				},
+			});
+			if (!socket) { failed(); return; }
+			if (this.udp.get(key) !== flow) { socket.close(); return; }
+			flow.socket = socket;
+		} catch {
+			failed();
+			return;
+		}
+		if (!this.udpTimer) {
+			this.udpTimer = setInterval(() => {
+				const cutoff = performance.now() - UDP_IDLE_MS;
+				for (const [id, f] of this.udp) if (f.active <= cutoff) this.closeUdp(id);
+			}, UDP_IDLE_MS / 2);
+			this.udpTimer.unref?.();
+		}
+		return flow;
+	}
 
 	udpInput(f: Uint8Array, dv: DataView, src: number, dst: number, l4: number, end: number): void {
 		if (end - l4 < 8) return;
 		const sport = dv.getUint16(l4), dport = dv.getUint16(l4 + 2);
-		const payload = f.subarray(l4 + 8, Math.min(end, l4 + dv.getUint16(l4 + 4)));
+		const length = dv.getUint16(l4 + 4);
+		if (length < 8 || l4 + length > end) return;
+		const payload = f.subarray(l4 + 8, l4 + length);
 		if (dport === 67) return this.dhcp(payload);
 		if (dport === 53 && (dst === this.dns || dst === this.gw)) {
 			void this.dnsQuery(payload, src, sport, dst);
 			return;
 		}
 		if (dst === 0xffffffff || dst >>> 28 === 14) return;
-		this.icmpUnreachable(f, l4, src, dst, 3);
+		const key = `${src}/${sport}/${dst}/${dport}`;
+		let flow = this.udp.get(key);
+		if (!flow) {
+			const host = this.backendHost(dst);
+			if (!host || !dport || !this.backend.openUdp || this.udp.size >= MAX_UDP_FLOWS) {
+				this.icmpUnreachable(f, l4, src, dst, 3);
+				return;
+			}
+			// The kernel reuses the input buffer. Keep only the IP and UDP headers for ICMP.
+			flow = this.udpFlow(key, host, src, sport, dst, dport, f.slice(0, l4 + 8), l4);
+		}
+		if (flow) {
+			flow.active = performance.now();
+			flow.socket?.send(payload);
+		}
 	}
 
 	dhcp(p: Uint8Array): void {

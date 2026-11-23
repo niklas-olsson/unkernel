@@ -436,6 +436,8 @@ deploying the page needs no kernel toolchain.
   mirror; `?routes=0` sends them through Wisp too). A page served from an origin outside the
   Wisp server's allow list needs its own Wisp server (js.md). A `ws://`
   server is blocked as mixed content on an `https://` page.
+  Network settings' Forward UDP (`?udp=1`) enables outbound IPv4
+  datagrams for Wisp servers that support them (js.md, Network).
 - The distro (above): `?distro=<name>` (default `debian`, else the first
   image; an unknown name boots the default, with a warning line, a toast,
   the Distro row in System's Environment and the option's note; `none` attaches
@@ -654,7 +656,7 @@ deploying the page needs no kernel toolchain.
   open and the hidden `#apps-parked` while not, so their ids (`#opt-*`,
   `#data-status`, `#copy-area`, `#reboot`...) are always in the document.
   Settings: Machine, Distro, Storage (the data disk and its actions),
-  Network (Wisp, the preview), Display and sound (and the font size),
+  Network (Wisp, optional outbound UDP, the preview), Display and sound (and the font size),
   Desktop (DesktopSettings.tsx), Session, Keyboard, About; its footer
   says what changed and has Suspend (`#suspend`, Resume once suspended)
   and Reboot (`#reboot`). System: Overview (a resource monitor: the

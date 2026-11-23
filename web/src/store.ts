@@ -184,6 +184,7 @@ export interface Options {
 	mem: string;
 	net: "default" | "custom" | "off";
 	wisp: string;
+	udp: "on" | "off";
 	jit: "on" | "off";
 	verbose: "clear" | "keep";
 	display: "on" | "off";

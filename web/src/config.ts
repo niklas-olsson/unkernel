@@ -18,6 +18,7 @@
 //   ?net=0                             no network device (else: the Wisp server(s), default:
 //                                      the project's)
 //   ?wisp=<url>[,<url>...] | ?wisp=0   Wisp servers to race (0 = no network device)
+//   ?udp=1                             outbound IPv4 UDP (requires a UDP-capable Wisp relay)
 //   ?routes=0                          URL only: plain HTTP to the hosts of DEFAULT_ROUTES goes
 //                                      through Wisp too (default: answered with fetch() from
 //                                      their CORS mirrors, the SDK's fetchRoutes(); net.ts)
@@ -204,7 +205,7 @@ export const DEFAULT_CMDLINE = "console=hvc0 rdinit=/init";
 /** localStorage: the saved settings (the header above), a JSON object of strings. */
 export const SETTINGS_KEY = "kw.settings";
 /** The settings' names. ?net=0 is read as ?wisp=0 and never saved. */
-export const SETTING_NAMES: readonly string[] = ["mem", "append", "net", "wisp", "jit", "verbose", "display", "sound", "data", "datasize", "distro", "root", "worker", "shared", "cpus", "autosuspend", "askleave", "gl"];
+export const SETTING_NAMES: readonly string[] = ["mem", "append", "net", "wisp", "udp", "jit", "verbose", "display", "sound", "data", "datasize", "distro", "root", "worker", "shared", "cpus", "autosuspend", "askleave", "gl"];
 
 /** The saved settings ({} where there are none or localStorage refuses). */
 export function loadSettings(): Record<string, string> {
@@ -258,6 +259,8 @@ export interface Config {
 	net: boolean;
 	/** ?wisp= servers, or null for the SDK's DEFAULT_WISP_SERVERS. */
 	wisp: string[] | null;
+	/** Forward UDP to the selected Wisp relay. */
+	udp: boolean;
 	/** Plain-HTTP hosts answered with fetch(): DEFAULT_ROUTES, or null with ?routes=0. */
 	routes: Record<string, string> | null;
 	/** kwemu's JIT tier (?jit=0 turns it off). */
@@ -492,6 +495,7 @@ export function readConfig(search: string = location.search, saved: Record<strin
 		baseCmdline: append || DEFAULT_CMDLINE,
 		cmdlineGiven: !!append || !!root,
 		net: wispParam !== "0",
+		udp: params.get("udp") === "1",
 		wisp: wisp?.length ? wisp : null,
 		routes: url.get("routes") === "0" ? null : { ...DEFAULT_ROUTES },
 		jit: params.get("jit") !== "0",

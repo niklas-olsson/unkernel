@@ -1582,6 +1582,13 @@ parts that are easy to get wrong.
   198.18.0.0/15 and a bad name fails at connect time. It also has no
   connect acknowledgement (a refused connect becomes a reset), no
   half-close, and flow control in one direction only.
+- The page's Network → Forward UDP option (`?udp=1`) and the SDK's
+  Wisp `udp: true` option enable outbound IPv4 datagrams for a relay
+  that supports them. NetStack maps a guest socket and destination to
+  one connected UDP stream, caps the mappings and expires idle ones.
+  Wisp uses one DATA packet per datagram with no CONTINUE credit.
+  Fetch-only destinations still refuse UDP. Direct and TCP-only
+  backends return ICMP port unreachable for UDP beyond DHCP and DNS.
 - `fetchRoutes(inner, routes)` (`net-fetch.ts`) wraps a backend: the host
   names in `routes` resolve to reserved addresses in 198.51.100.0/24, and
   port 80 on them is a minimal HTTP/1.1 server (GET and HEAD, keep-alive,
@@ -1596,7 +1603,7 @@ parts that are easy to get wrong.
   takes the string form as `routes` (`buildNet()`). The page routes
   `deb.debian.org` to a CORS mirror (`web/src/config.ts` DEFAULT_ROUTES,
   `?routes=0` turns it off).
-- Not implemented: IPv6, IP fragments, UDP beyond DHCP and DNS, ICMP beyond
+- Not implemented: IPv6, IP fragments, ICMP beyond
   10.0.2.2/3, SACK, timestamps and inbound connections. A raw-Ethernet
   relay backend is not useful: v86's relay gave DHCP but no upstream DNS
   or TCP.

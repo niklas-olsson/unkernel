@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // NetStack backend for Wisp v1 servers (https://github.com/MercuryWorkshop/wisp-protocol):
-// the guest's TCP connections, multiplexed over one WebSocket. Works
+// the guest's TCP connections and UDP datagrams over one WebSocket. Works
 // wherever there is a global WebSocket (browsers, Node >= 22).
 //
 // Packets: [type u8][stream id u32 LE][payload], all integers little-endian.
-//   0x01 CONNECT  type u8 (1 = TCP), port u16, hostname   client -> server
+//   0x01 CONNECT  type u8 (1 = TCP, 2 = UDP), port u16, hostname   client -> server
 //   0x02 DATA     bytes                                   both
 //   0x03 CONTINUE buffer remaining u32 (packets)          server -> client
 //   0x04 CLOSE    reason u8                               both
-// The server opens with CONTINUE on stream 0 (the per-stream packet credit).
+// The server opens with CONTINUE on stream 0 (the per-TCP-stream packet credit).
 //
 // What the guest can see, compared with real sockets:
 //   * Wisp has no DNS. lookup() hands out stable fake addresses from
@@ -22,7 +22,7 @@
 //   * Only the client -> server direction is flow-controlled; pause() is
 //     a no-op and NetStack buffers what the server sends.
 
-import type { NetBackend, NetConnection, NetConnectionEvents } from "./net.ts";
+import type { NetBackend, NetConnection, NetDatagramEvents, NetDatagramSocket } from "./net.ts";
 
 /**
  * The default Wisp server: the project's own. Public alternatives (run by
@@ -35,6 +35,8 @@ export const DEFAULT_WISP_SERVERS: readonly string[] = Object.freeze(["wss://wis
 
 export interface WispBackendOptions {
 	log?: (msg: string) => void;
+	/** Forward outbound UDP when the relay supports datagram streams. Defaults to false. */
+	udp?: boolean;
 	/**
 	 * Extra handshake headers, e.g. `{ Origin: "http://localhost" }`. Only
 	 * runtimes whose WebSocket takes `{ headers }` (Node, Deno, Bun) send
@@ -56,6 +58,8 @@ export interface WispBackend extends NetBackend {
 const RETRY_MS = 5000;
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const MAX_PACKET = 64 * 1024;          // coalesce guest segments up to this size
+const UDP_PENDING_PACKETS = 32, UDP_PENDING_BYTES = 64 * 1024;
+const UDP_SOCKET_HIGH_WATER = 256 * 1024;
 const FAKE_BASE = (198 << 24 | 18 << 16) >>> 0, FAKE_SIZE = 1 << 17;
 const enc = new TextEncoder();
 
@@ -77,14 +81,17 @@ const ip4 = (s: string) => s.split(".").reduce((a, b) => ((a << 8) | Number(b)) 
 const isIPv4 = (s: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
 
 interface Stream {
-	ev: NetConnectionEvents;
+	ev: NetDatagramEvents;
+	closed(err: Error | null): void;
+}
+
+interface TcpStream extends Stream {
 	credit: number;
 	out: Uint8Array[];
 	outBytes: number;
 	done: boolean;
 	scheduled: boolean;
 	open: boolean;
-	closed(err: Error | null): void;
 	pump(): void;
 }
 
@@ -102,7 +109,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 	let ws: WebSocket | null = null, ready: Promise<WebSocket> | null = null, failedAt = -Infinity, warned = false;
 	let initialCredit = 0;
 	let nextId = 1;
-	const streams = new Map<number, Stream>();
+	const streams = new Map<number, TcpStream | Stream>();
 	const nameToIp = new Map<string, number>(), ipToName = new Map<number, string>();
 	let nextFake = 1;
 	let connecting: WebSocket[] = [];   // sockets racing for the handshake
@@ -167,7 +174,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 		switch (m[0]) {
 		case 0x02: st.ev.onData(m.subarray(5)); break;
 		case 0x03:
-			if (m.length >= 9) { st.credit = dv.getUint32(5, true); st.pump(); }
+			if (m.length >= 9 && "credit" in st) { st.credit = dv.getUint32(5, true); st.pump(); }
 			break;
 		case 0x04: {
 			const r = m.length > 5 ? m[5]! : 0x01;
@@ -177,11 +184,61 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 		}
 	}
 
+	function connectPacket(id: number, type: 1 | 2, host: string, port: number): Uint8Array<ArrayBuffer> {
+		const name = enc.encode(isIPv4(host) ? ipToName.get(ip4(host)) ?? host : host);
+		const req = new Uint8Array(3 + name.length);
+		req[0] = type;
+		new DataView(req.buffer).setUint16(1, port, true);
+		req.set(name, 3);
+		return packet(0x01, id, req);
+	}
+
+	function openUdp({ host, port }: { host: string; port: number }, ev: NetDatagramEvents): NetDatagramSocket {
+		const id = nextId++;
+		const request = connectPacket(id, 2, host, port);
+		let socket: WebSocket | undefined, pendingBytes = 0;
+		const pending: Uint8Array[] = [];
+		function closed(error: Error | null): void {
+			if (!streams.delete(id)) return;
+			pending.length = 0;
+			ev.onClose(error);
+		}
+		function send(data: Uint8Array): void {
+			// Media datagrams have no Wisp credit. Drop on congestion instead of building latency.
+			if (socket?.readyState === WebSocket.OPEN && socket.bufferedAmount < UDP_SOCKET_HIGH_WATER) {
+				socket.send(packet(0x02, id, data));
+			}
+		}
+		streams.set(id, { ev, closed });
+		connectWs().then((s) => {
+			if (!streams.has(id)) return;
+			s.send(request);
+			socket = s;
+			for (const data of pending) send(data);
+			pending.length = 0;
+		}).catch(closed);
+		return {
+			send(data) {
+				if (!streams.has(id)) return;
+				if (socket) send(data);
+				else if (pending.length < UDP_PENDING_PACKETS && pendingBytes + data.length <= UDP_PENDING_BYTES) {
+					pending.push(data.slice());
+					pendingBytes += data.length;
+				}
+			},
+			close() {
+				if (!streams.delete(id)) return;
+				pending.length = 0;
+				if (socket?.readyState === WebSocket.OPEN) socket.send(packet(0x04, id, Uint8Array.of(0x02)));
+			},
+		};
+	}
+
 	return {
 		connect({ host, port }, ev): NetConnection {
 			const id = nextId++;
-			const name = isIPv4(host) ? ipToName.get(ip4(host)) ?? host : host;
-			const st: Stream = {
+			const request = connectPacket(id, 1, host, port);
+			const st: TcpStream = {
 				ev, credit: 0, out: [], outBytes: 0, done: false, scheduled: false, open: false,
 				closed(err) {
 					if (st.done) return;
@@ -213,11 +270,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 			streams.set(id, st);
 			connectWs().then((s) => {
 				if (st.done) return;
-				const req = new Uint8Array(3 + enc.encode(name).length);
-				req[0] = 0x01;
-				new DataView(req.buffer).setUint16(1, port, true);
-				req.set(enc.encode(name), 3);
-				s.send(packet(0x01, id, req));
+				s.send(request);
 				st.credit = initialCredit;
 				st.open = true;
 				ev.onConnect();
@@ -242,6 +295,7 @@ export function wispBackend(url: string | readonly string[], opts: WispBackendOp
 				get buffered() { return st.outBytes; },
 			};
 		},
+		openUdp: opts.udp ? openUdp : undefined,
 		lookup(name) {
 			if (isIPv4(name)) return Promise.resolve([name]);
 			let ip = nameToIp.get(name);

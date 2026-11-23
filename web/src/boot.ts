@@ -1617,7 +1617,7 @@ export function start(): void {
 						shared: cfg.shared ? undefined : false, // shared memory where the page is cross-origin isolated (?shared=0: never)
 						disks: dataDisks as DiskSpec[], onDiskError: (_i, e) => saveError(e),
 						distro: distro?.url, // a spec the page makes (relative to the page); the worker opens it
-						net: browserNetSpec({ enabled: cfg.net, servers: cfg.wisp, routes: cfg.routes }), // Wisp, in the worker (net.ts)
+						net: browserNetSpec({ enabled: cfg.net, servers: cfg.wisp, udp: cfg.udp, routes: cfg.routes }), // Wisp, in the worker (net.ts)
 						restore, transferRestore: true, // the snapshot is read for this boot only
 					});
 					// Report the successful boot attempt, even if an earlier restore was refused.
@@ -1632,7 +1632,7 @@ export function start(): void {
 					})
 					: createKernel({
 						...common, ...glDevices(), kernel: module, disks: dataDisks as BlockDevice[], restore, distro: distroDisk ?? undefined,
-						net: browserNet({ enabled: cfg.net, servers: cfg.wisp, routes: cfg.routes, log }), // Wisp (net.ts)
+						net: browserNet({ enabled: cfg.net, servers: cfg.wisp, udp: cfg.udp, routes: cfg.routes, log }), // Wisp (net.ts)
 					});
 			};
 			if (resume) {

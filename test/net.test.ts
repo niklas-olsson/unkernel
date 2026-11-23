@@ -8,7 +8,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
-import { ip4, ip4str, type NetBackend, type NetConnectionEvents } from "../js/core/net.ts";
+import { ip4, ip4str, type NetBackend, type NetConnectionEvents, type NetDatagramEvents } from "../js/core/net.ts";
+import { fetchRoutes } from "../js/core/net-fetch.ts";
 import { wispBackend } from "../js/core/net-wisp.ts";
 import { directBackend, wispBackend as nodeWispBackend } from "../js/node/net.ts";
 import { acceptWebSocket } from "./ws-server.ts";
@@ -72,7 +73,7 @@ test("DNS A query is answered from the backend, AAAA is empty, failures map to r
 	assert.equal(byId[9]!.payload[3]! & 15, 3);
 });
 
-test("ping the gateway; UDP elsewhere gets port unreachable", () => {
+test("ping the gateway; UDP without a backend gets port unreachable", () => {
 	const { stack, out } = mkStack({});
 	const icmp = Uint8Array.from([8, 0, 0, 0, 0, 1, 0, 1, 1, 2, 3, 4]);
 	new DataView(icmp.buffer).setUint16(2, csum(icmp, 0, icmp.length));
@@ -81,6 +82,94 @@ test("ping the gateway; UDP elsewhere gets port unreachable", () => {
 	assert.equal(out.length, 2);
 	assert.equal(out[0]!.icmpType, 0);
 	assert.equal(out[1]!.icmpType, 3);
+});
+
+test("Wisp UDP preserves packet boundaries, ports and host names through the page's fetch routes", async () => {
+	await withWisp(async (b, seen) => {
+		const backend = fetchRoutes(b, { "mirror.test": "https://mirror.invalid" });
+		const { stack, out } = mkStack(backend);
+		try {
+			const dst = ip4((await backend.lookup("echo.test"))[0]!);
+			const packets = [[], [1], [2, 3], [4, 5, 6], [7, 8, 9, 10]];
+			for (const bytes of packets) stack.send(udp(40001, dst, 3478, Uint8Array.from(bytes)));
+			await until(() => out.length === packets.length);
+			assert.equal(seen.udpOpened, 1);
+			assert.deepEqual(seen.hosts, ["echo.test:3478"]);
+			assert.deepEqual(out.map((p) => Array.from(p.payload)), packets);
+			for (const p of out) {
+				assert.deepEqual([p.src, p.sport, p.dst, p.dport], [dst, 3478, GUEST, 40001]);
+				const len = p.dv.getUint16(38);
+				const sum = (dst >>> 16) + (dst & 0xffff) + (GUEST >>> 16) + (GUEST & 0xffff) + 17 + len;
+				assert.equal(csum(p.f, 34, len, sum), 0, "UDP checksum");
+			}
+			const mirror = ip4((await backend.lookup("mirror.test"))[0]!);
+			stack.send(udp(40001, mirror, 80, new Uint8Array(1)));
+			assert.equal(out.at(-1)?.icmpType, 3, "fetch-only hosts refuse UDP locally");
+			const absent = ip4((await backend.lookup("absent.test"))[0]!);
+			stack.send(udp(40001, absent, 3478, new Uint8Array(1)));
+			await until(() => out.length === packets.length + 2);
+			assert.equal(out.at(-1)?.icmpType, 3, "the relay's refusal reaches the guest");
+			assert.deepEqual(seen.hosts, ["echo.test:3478", "absent.test:3478"]);
+		} finally {
+			stack.close();
+		}
+	}, { udp: true });
+});
+
+test("UDP mappings expire when idle, survive traffic, and stop delivering after reset", (t) => {
+	let now = 0, closed = 0;
+	t.mock.method(performance, "now", () => now);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const peers: NetDatagramEvents[] = [];
+	const { stack, out } = mkStack({
+		openUdp(_addr, ev) {
+			peers.push(ev);
+			return { send() {}, close() { closed++; } };
+		},
+	});
+	t.after(() => stack.close());
+	const packet = (port: number) => udp(port, ip4("192.0.2.1"), 3478, new Uint8Array(1));
+	stack.send(packet(40001));
+	stack.send(packet(40002));
+	now = 60_000;
+	t.mock.timers.tick(60_000);
+	peers[1]!.onData(Uint8Array.of(1));
+	now += 60_000;
+	t.mock.timers.tick(60_000);
+	assert.equal(closed, 1);
+	stack.send(packet(40001));
+	assert.equal(peers.length, 3);
+	peers[0]!.onClose(new Error("old peer"));
+	peers[0]!.onData(Uint8Array.of(2));
+	assert.equal(out.length, 1);
+	peers[2]!.onData(Uint8Array.of(3));
+	stack.close();
+	peers[2]!.onData(Uint8Array.of(4));
+	assert.equal(closed, 3);
+	assert.deepEqual(out.map((p) => p.payload[0]), [1, 3]);
+});
+
+test("a busy guest drops excess UDP; draining the receive queue allows replies again", (t) => {
+	let peer!: NetDatagramEvents;
+	const { stack } = mkStack({
+		openUdp(_addr, ev) {
+			peer = ev;
+			return { send() {}, close() {} };
+		},
+	});
+	t.after(() => stack.close());
+	const rx: Uint8Array[] = [];
+	stack.attach({ netRx: rx, receiveFrame: (f) => { rx.push(f); } });
+	stack.send(udp(40003, ip4("192.0.2.1"), 3478, new Uint8Array()));
+	for (let i = 0; i < 1000; i++) peer.onData(Uint8Array.of(1));
+	assert.ok(rx.length > 0 && rx.length < 1000);
+	const full = rx.length;
+	peer.onData(Uint8Array.of(2));
+	assert.equal(rx.length, full);
+	rx.shift();
+	peer.onData(Uint8Array.of(3));
+	assert.equal(rx.length, full);
+	assert.equal(rx.at(-1)!.at(-1), 3);
 });
 
 test("TCP to a refused port gets RST; unknown segment gets RST", async () => {
@@ -132,6 +221,7 @@ test("TCP retransmits unacknowledged data after the RTO and respects the guest w
 
 test("Wisp backend: fake DNS, flow-controlled writes, clean and refused closes", async () => {
 	await withWisp(async (b, seen) => {
+		assert.equal(b.openUdp, undefined, "UDP requires a capable relay and opt-in");
 		const [ip] = await b.lookup("echo.test");
 		assert.match(ip!, /^198\.1[89]\./);
 		assert.deepEqual(await b.lookup("echo.test"), [ip], "stable mapping");

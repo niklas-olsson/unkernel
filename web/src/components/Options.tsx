@@ -311,6 +311,10 @@ export function NetworkOptions() {
 				<input id="opt-wisp" name="wisp" type="text" inputMode="url" placeholder="wss://wisp.example.com/" autoCapitalize="off" autoComplete="off" spellCheck={false}
 					value={o.wisp} onChange={onField} onKeyDown={enter} className="field h-8 px-2.5 text-[12.5px]" />
 			</Field>
+			<Checks>
+				<Check id="opt-udp" name="udp" on="on" off="off" value={o.udp} blocked={o.net === "off"}
+					label="Forward UDP" note="Requires a Wisp server with UDP support" />
+			</Checks>
 		</OptionsForm>
 	);
 }

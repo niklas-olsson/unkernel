@@ -134,6 +134,7 @@ export function createUi(cfg: Config) {
 		mem: cfg.memParam || "auto",
 		net: !cfg.net ? "off" : cfg.wisp ? "custom" : "default",
 		wisp: (cfg.wisp ?? []).join(", "), // the default servers are not shown
+		udp: cfg.udp ? "on" : "off",
 		jit: cfg.jit ? "on" : "off",
 		verbose: cfg.verbose ? "keep" : "clear",
 		display: cfg.display ? "on" : "off",
@@ -593,6 +594,7 @@ export function createUi(cfg: Config) {
 		set("mem", o.mem === "auto" ? null : o.mem);
 		const wisp = o.wisp.split(",").map((s) => s.trim()).filter(Boolean).join(",");
 		set("wisp", o.net === "off" ? "0" : o.net === "custom" && wisp ? wisp : null);
+		set("udp", o.net !== "off" && o.udp === "on" ? "1" : null);
 		set("jit", o.jit === "off" ? "0" : null);
 		set("verbose", o.verbose === "keep" ? "1" : null);
 		set("display", o.display === "off" ? "0" : null);

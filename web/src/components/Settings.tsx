@@ -49,7 +49,7 @@ const SECTIONS: SectionDef[] = [
 /** Which section each saved setting's control is in (ui.nextSettings()'s names), for the changed dots. */
 const SETTING_SECTION: Record<string, Tab> = {
 	mem: "boot", cpus: "boot", worker: "boot", jit: "boot", verbose: "boot", append: "boot",
-	distro: "distro", root: "distro", data: "storage", datasize: "storage", wisp: "network",
+	distro: "distro", root: "distro", data: "storage", datasize: "storage", wisp: "network", udp: "network",
 	display: "display", gl: "display", sound: "display", autosuspend: "session", askleave: "session",
 };
 

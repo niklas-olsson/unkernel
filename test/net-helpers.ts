@@ -170,13 +170,14 @@ export async function echoTest(backend: NetBackend): Promise<void> {
 /**
  * A minimal Wisp v1 server: CONNECT to "echo.test" echoes DATA and closes
  * (reason 0x02) after "bye"; any other host is refused (0x44). The credit is
- * tiny, so the client has to wait for CONTINUE.
+ * tiny, so TCP has to wait for CONTINUE. UDP echoes one packet at a time without credit.
  */
-export async function withWisp(fn: (b: WispBackend, seen: { hosts: string[]; packets: number }, url: string) => Promise<void>): Promise<void> {
+export async function withWisp(fn: (b: WispBackend, seen: { hosts: string[]; packets: number; udpOpened: number }, url: string) => Promise<void>, opts?: { udp: boolean }): Promise<void> {
 	const CREDIT = 2;
-	const seen = { hosts: [] as string[], packets: 0 };
+	const seen = { hosts: [] as string[], packets: 0, udpOpened: 0 };
 	const http = createHttpServer((_req, res) => res.writeHead(404).end());
 	http.on("upgrade", (req, socket, head) => {
+		const datagrams = new Set<number>();
 		const pkt = (type: number, id: number, payload: ArrayLike<number>) => {
 			const b = Buffer.alloc(5 + payload.length);
 			b[0] = type; b.writeUInt32LE(id, 1); b.set(payload, 5);
@@ -188,10 +189,12 @@ export async function withWisp(fn: (b: WispBackend, seen: { hosts: string[]; pac
 				const host = m.subarray(8).toString();
 				seen.hosts.push(`${host}:${m.readUInt16LE(6)}`);
 				if (host !== "echo.test") ws.send(pkt(0x04, id, [0x44]));
+				else if (m[5] === 2) { datagrams.add(id); seen.udpOpened++; }
 			} else if (m[0] === 0x02) {
 				seen.packets++;
 				const data = m.subarray(5);
 				ws.send(pkt(0x02, id, data));
+				if (datagrams.has(id)) return;
 				ws.send(pkt(0x03, id, [CREDIT, 0, 0, 0]));
 				if (data.toString().endsWith("bye")) ws.send(pkt(0x04, id, [0x02]));
 			}
@@ -200,7 +203,7 @@ export async function withWisp(fn: (b: WispBackend, seen: { hosts: string[]; pac
 	});
 	await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
 	const url = `ws://127.0.0.1:${(http.address() as AddressInfo).port}/`;
-	const b = wispBackend(url);
+	const b = wispBackend(url, opts);
 	try {
 		await fn(b, seen, url);
 	} finally {

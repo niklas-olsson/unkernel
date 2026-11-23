@@ -138,6 +138,7 @@ The page takes a few URL parameters:
 | `?append=...` | Extra kernel command line |
 | `?net=0` | Boot without a network |
 | `?wisp=wss://...` | Use your own [Wisp](https://github.com/MercuryWorkshop/wisp-protocol) proxy |
+| `?udp=1` | Forward outbound IPv4 UDP through a compatible Wisp relay. Also available in Settings → Network. |
 | `?jit=0` | Interpreter only |
 | `?data=0` | No persistent disk, a fresh system every time |
 | `?worker=0` | Run the kernel on the page's thread (default: in a Web Worker where the page is cross-origin isolated) |
@@ -285,7 +286,8 @@ well behind native.
 - The SDK and CLI boot one CPU by default; the page boots several where
   it can (`?cpus=`). A snapshot of several CPUs (SMP), and so a session
   suspended on the page, resumes only on as many.
-- No IPv6, no UDP beyond DHCP and DNS, no inbound network connections
+- Outbound UDP beyond DHCP and DNS requires a UDP-capable Wisp relay and
+  explicit opt-in. The network has no IPv6 or inbound connections
   ([`vm.connect()`, `vm.fetch()`](#talk-over-vsock) and `--forward` reach
   guest servers over vsock instead).
 - No ptrace register sets, so `strace` and `gdb` don't work. No seccomp.
@@ -347,6 +349,11 @@ await createKernel({ net: wispBackend(DEFAULT_WISP_SERVERS) });     // anywhere:
 Networking is off unless you pass `net`. Any object with `connect` and
 `lookup` methods can carry the guest's TCP and DNS, so you can write your
 own backend.
+
+For outbound UDP, use `wispBackend(servers, { udp: true })` or set
+`udp: true` in the worker's Wisp backend spec. Each guest socket and
+remote endpoint gets its own mapping. A custom backend can implement
+`openUdp` to carry individual datagrams.
 
 ### Add disks
 

@@ -91,10 +91,12 @@ export interface NetSpec extends SpecCommon {
 		| { kind: "direct" }
 		| {
 			kind: "wisp"; servers: string | string[]; headers?: Record<string, string>;
+			/** Forward outbound UDP through this relay. Defaults to false. */
+			udp?: boolean;
 			/** Plain HTTP to these host names is answered with fetch() from these base URLs (net-fetch.ts fetchRoutes()). */
 			routes?: Record<string, string>;
 		};
-	/** TCP to the gateway (10.0.2.2) goes to the host's 127.0.0.1 (direct only). */
+	/** Map the gateway (10.0.2.2) to 127.0.0.1 at the backend. Default false. */
 	hostLoopback?: boolean;
 	mtu?: number;
 	mac?: string;
@@ -129,7 +131,7 @@ export const coreDevices: DeviceRegistry = {
 	},
 	backends: {
 		wisp: (spec: Extract<NetBackendSpec, { kind: "wisp" }>, ctx: DeviceContext) =>
-			wispBackend(spec.servers, { headers: spec.headers, log: ctx.log }),
+			wispBackend(spec.servers, { headers: spec.headers, udp: spec.udp, log: ctx.log }),
 	},
 };
 

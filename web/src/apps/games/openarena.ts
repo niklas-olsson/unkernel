@@ -7,8 +7,8 @@
 // compatibility profile that guest GL offers (.agents/gl.md); with guest GL
 // off Mesa draws it in software (llvmpipe). Started windowed at 1024x768
 // (cvars it saves in ~/.openarena). The mouse aims (SDL's relative mode:
-// wland has relative pointers and pointer locks). Online play needs UDP,
-// which the page's network does not carry; a game against bots runs its
+// wland has relative pointers and pointer locks). Online play needs UDP.
+// A game against bots runs its
 // server in the same process. About 636 MiB installed, 449 MiB to
 // download, the game's data most of it (the image's package lists,
 // 2026-11-22). Its sound plays where the page has a sound card.
@@ -29,7 +29,7 @@ export default {
 	waylandIds: ["ioquake3"],
 	files: {
 		README: "OpenArena: Single Player or Skirmish plays against bots. Online servers need\n" +
-			"UDP, which the page's network does not carry. The mouse aims (click the\n" +
+			"UDP forwarding through a compatible Wisp relay. The mouse aims (click the\n" +
 			"window to grab it), WASD moves, Space jumps, the mouse button fires, Esc is\n" +
 			"the menu. Settings are in ~/.openarena.\n",
 	},

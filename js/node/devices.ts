@@ -17,6 +17,6 @@ export const nodeDevices: DeviceRegistry = extendDevices(coreDevices, {
 	},
 	backends: {
 		direct: () => directBackend(),
-		wisp: (spec: Extract<NetBackendSpec, { kind: "wisp" }>, ctx: DeviceContext) => wispBackend(spec.servers, { headers: spec.headers, log: ctx.log }),
+		wisp: (spec: Extract<NetBackendSpec, { kind: "wisp" }>, ctx: DeviceContext) => wispBackend(spec.servers, { headers: spec.headers, udp: spec.udp, log: ctx.log }),
 	},
 });
