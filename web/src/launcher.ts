@@ -158,8 +158,11 @@ const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 // handed over with sudo, so the user can edit its files. $2, when set, is
 // where the directory used to be (relative to ~): moved to $1 when there and
 // $1 is not, with its parent removed once empty.
+// For an existing directory, the shell can check ownership directly. For a
+// symlink, stat below checks the link's owner as usual.
 const DIR_SH = `cd ~
 [ -n "$2" ] && [ -d "$2" ] && [ ! -e "$1" ] && mkdir -p "\${1%/*}" && mv "$2" "$1" 2>/dev/null && rmdir "\${2%/*}" 2>/dev/null
+[ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && exit 0
 mkdir -p "$1" 2>/dev/null && [ "$(stat -c %u "$1")" = "$(id -u)" ] && exit 0
 ${SUDO_SH}
 S=\${SUDO:+$SUDO -n}
@@ -172,11 +175,12 @@ const WRITE_SH = `set -e
 cd ~
 case "$1" in */*) d=\${1%/*};; *) d=.;; esac
 S=
-if ! { mkdir -p "$d" 2>/dev/null && [ -w "$d" ] && { [ ! -e "$1" ] || [ -w "$1" ]; }; }; then
+make_dir() { [ -d "$d" ] || $S mkdir -p "$d"; }
+if ! make_dir 2>/dev/null || [ ! -w "$d" ] || { [ -e "$1" ] && [ ! -w "$1" ]; }; then
 	${SUDO_SH}
 	S=\${SUDO:+$SUDO -n}
+	make_dir
 fi
-$S mkdir -p "$d"
 $S tee "$1" >/dev/null
 $S chmod "$2" "$1"`;
 
