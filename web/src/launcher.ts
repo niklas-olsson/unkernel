@@ -62,9 +62,9 @@
 //    and stays after a failure;
 // 4. with ports, waits until the guest answers http on each, opens the
 //    preview on the first (preview.ts) and toasts the others.
-// An app runs once at a time: launching one whose window is open (a window
-// named after it, even after run.sh ended) shows that window instead, and
-// one being installed shows its installer.
+// Launching an open app focuses its mapped Wayland window first, then its
+// named terminal if present (even after run.sh ended). Launching an app
+// during installation shows its installer.
 // An app names its packages per distro (`packages: { alpine, debian }`), since
 // the names differ; its scripts handle what else differs (paths, wget on
 // Alpine and curl on Debian, apk's or dpkg's database). Alpine's come from
@@ -75,6 +75,7 @@
 // but disabled, with why; so is one whose `packages` leave out this boot's
 // distro (?distro=).
 import { createElement } from "react";
+import { appWindow, WAYLAND } from "./appwindows.ts";
 import { isPageApp, type AppDef, type AppDownload, type AppFiles, type Distro, type TerminalApp } from "./apps/types.ts";
 import { Installer } from "./components/Installer.tsx";
 import { getFile, pushFile } from "./download.ts";
@@ -510,6 +511,8 @@ export async function launch(d: AppDef): Promise<void> {
 	if (isPageApp(d)) { d.open(); return; }
 	const vm = KW.vm as KernelHandle | undefined;
 	if (!KW.windows || !vm) { ui.toast("The system is not running yet"); return; }
+	const mapped = d.needs?.wayland ? appWindow(d) : undefined;
+	if (mapped?.appId === WAYLAND) { wm.focus(mapped.id); return; }
 	const open = appTerminal(d);
 	if (open) return selectTerminal(open.n);
 	if (showInstaller(d.id)) return;

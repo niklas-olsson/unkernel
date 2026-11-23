@@ -87,7 +87,7 @@ export function windowApp(id: string): App | undefined {
 }
 
 /** The window a pinned app's tile stands for (the first that windowApp() gives it, a Wayland window first). */
-export function appWindow(app: App): WmWindow | undefined {
+export function appWindow(app: Pick<App, "id">): WmWindow | undefined {
 	const ws = wm.list().filter((w) => windowApp(w.id)?.id === app.id);
 	return ws.find((w) => w.appId === WAYLAND) ?? ws[0];
 }
