@@ -2,3 +2,5 @@ packages:
   - web
 minimumReleaseAgeExclude:
   - wland
+patchedDependencies:
+  wland@0.1.0-261124-3c987e5: patches/wland@0.1.0-261124-3c987e5.patch

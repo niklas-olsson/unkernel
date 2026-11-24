@@ -1,0 +1,228 @@
+# SPDX-License-Identifier: MIT
+# Copyright 2026 the unkernel contributors
+diff --git a/dist/engine.d.mts b/dist/engine.d.mts
+index e524b744cffd28b5ecfc5f3faa60d904453f2d35..7f5e1b8a00e4baf90413da427e476fd2f985f0df 100644
+--- a/dist/engine.d.mts
++++ b/dist/engine.d.mts
+@@ -401,7 +401,7 @@ export interface Engine {
+ 	pointerMotion(conn: number, time: number, x: number, y: number, relative?: RelativeMotion): void;
+ 	pointerEnter(conn: number, surface: number, x: number, y: number): void;
+ 	pointerLeave(conn: number): void;
+-	/** button: linux evdev code (BTN_LEFT 0x110, BTN_RIGHT 0x111, BTN_MIDDLE 0x112). */
++	/** button: linux evdev code (BTN_LEFT 0x110, BTN_RIGHT 0x111, BTN_MIDDLE 0x112, BTN_SIDE 0x113, BTN_EXTRA 0x114). */
+ 	pointerButton(conn: number, time: number, button: number, pressed: boolean): void;
+ 	/** axis 0 vertical, 1 horizontal; value in surface units; value120 high-res
+ 	*  wheel steps (120 per detent). */
+diff --git a/dist/input.mjs b/dist/input.mjs
+index bba164f11f5f172c83ff682cf485565f18de7b4d..a30e666b66c0395a0b855f85941d78e3a524d097 100644
+--- a/dist/input.mjs
++++ b/dist/input.mjs
+@@ -137,8 +137,11 @@ const EVDEV = {
+ const BTN = {
+ 	0: 272,
+ 	1: 274,
+-	2: 273
++	2: 273,
++	3: 275,
++	4: 276
+ };
++const MOUSE_BUTTON_MASK = [1, 4, 2, 8, 16];
+ 
+ const NUMLOCK_KEYS = new Set([
+ 	"Numpad0",
+@@ -520,6 +523,9 @@ export function createInput(options) {
+ 		forgetBrowserKeys();
+ 		down.clear();
+ 		cancelTouches();
++		releaseMouseButtons();
++		mouseDelivered.clear();
++		if (captured?.mouse) release();
+ 		for (const g of [...grabs]) endGrab(g, "blur");
+ 	};
+ 	window.addEventListener("blur", onWindowBlur);
+@@ -644,6 +650,8 @@ export function createInput(options) {
+ 		
+ 		const left = new Set([captured?.conn, hovered]);
+ 		g.ignore = captured?.el;
++		// pointerLeave ends the client's implicit grab during WM takeover.
++		mouseHeld.clear();
+ 		release();
+ 		for (const conn of left) if (conn) engine.pointerLeave(conn);
+ 		hovered = 0;
+@@ -886,6 +894,7 @@ export function createInput(options) {
+ 		if (locked) {
+ 			const lost = locked;
+ 			locked = null;
++			releaseMouseButtons(lost.conn);
+ 			engine.pointerLockLost(lost.conn);
+ 		}
+ 		
+@@ -893,6 +902,42 @@ export function createInput(options) {
+ 	});
+ 	
+ 	
++	// Each mouse press remembers the Wayland connection that received it.
++	// A chord changes buttons in pointermove, even when the mouse is stationary.
++	const mouseHeld = new Map();
++	const mouseDelivered = new Set();
++	function releaseMouseButtons(conn) {
++		for (const [button, owner] of mouseHeld) {
++			if (conn !== undefined && owner !== conn) continue;
++			mouseHeld.delete(button);
++			engine.pointerButton(owner, now(), BTN[button], false);
++		}
++	}
++	function mouseButton(ev, surface) {
++		const code = BTN[ev.button];
++		if (code === undefined) return;
++		const pressed = (ev.buttons & MOUSE_BUTTON_MASK[ev.button]) !== 0;
++		let conn;
++		if (pressed) {
++			mouseDelivered.delete(ev.button);
++			if (!surface || mouseHeld.has(ev.button)) return;
++			conn = surface.conn;
++			mouseHeld.set(ev.button, conn);
++			mouseDelivered.add(ev.button);
++		} else {
++			conn = mouseHeld.get(ev.button);
++			if (conn === undefined) return;
++			mouseHeld.delete(ev.button);
++		}
++		engine.pointerButton(conn, now(), code, pressed);
++		ev.preventDefault();
++	}
++	on("pointercancel", (ev) => {
++		if (ev.pointerType !== "mouse") return;
++		releaseMouseButtons();
++		mouseDelivered.clear();
++		if (captured?.id === ev.pointerId) release();
++	});
+ 	on("pointerover", (ev) => {
+ 		if (touchPath.has(ev.pointerId)) return;
+ 		if (ev.pointerType === "touch" && !down.has(ev.pointerId)) {
+@@ -913,6 +958,10 @@ export function createInput(options) {
+ 		if (overHeld.delete(ev.pointerId)) return;
+ 		const s = locked ? null : target(ev);
+ 		if (!s) return;
++		if (ev.pointerType === "mouse") {
++			const next = ev.relatedTarget ? view.surfaceOf(ev.relatedTarget) : view.surfaceAt(ev.clientX, ev.clientY);
++			if (!ev.buttons || next?.conn !== s.conn) releaseMouseButtons(s.conn);
++		}
+ 		engine.pointerLeave(s.conn);
+ 		if (hovered === s.conn) hovered = 0;
+ 	});
+@@ -921,13 +970,15 @@ export function createInput(options) {
+ 	
+ 	on("pointermove", (ev) => {
+ 		const s = touchPath.has(ev.pointerId) ? null : target(ev);
+-		if (!s) return;
+-		const [x, y] = local(ev);
+-		engine.pointerMotion(s.conn, now(), x, y, {
+-			dx: ev.movementX || 0,
+-			dy: ev.movementY || 0,
+-			time: ev.timeStamp * 1e3
+-		});
++		if (s) {
++			const [x, y] = local(ev);
++			engine.pointerMotion(s.conn, now(), x, y, {
++				dx: ev.movementX || 0,
++				dy: ev.movementY || 0,
++				time: ev.timeStamp * 1e3
++			});
++		}
++		if (ev.pointerType === "mouse" && ev.button >= 0) mouseButton(ev, s);
+ 	});
+ 	on("pointerdown", (ev) => {
+ 		readLocks(ev);
+@@ -936,7 +987,12 @@ export function createInput(options) {
+ 		
+ 		
+ 		const s = grabsOf(ev.pointerId).length ? null : target(ev);
+-		if (!s) return;
++		const mouse = ev.pointerType === "mouse";
++		if (mouse) {
++			releaseMouseButtons();
++			mouseDelivered.clear();
++		}
++		if (!s || (mouse && BTN[ev.button] === undefined)) return;
+ 		const touch = touchPath.has(ev.pointerId);
+ 		
+ 		
+@@ -956,9 +1012,12 @@ export function createInput(options) {
+ 			ev.preventDefault();
+ 			return touchDown(ev, s);
+ 		}
+-		const btn = BTN[ev.button];
+-		if (btn !== undefined) engine.pointerButton(s.conn, now(), btn, true);
+-		ev.preventDefault();
++		if (mouse) mouseButton(ev, s);
++		else {
++			const btn = ev.button < 3 ? BTN[ev.button] : undefined;
++			if (btn !== undefined) engine.pointerButton(s.conn, now(), btn, true);
++			ev.preventDefault();
++		}
+ 		const el = ev.target;
+ 		if (captured && !captured.el.isConnected) captured = null;
+ 		if (!captured && typeof el.setPointerCapture === "function") {
+@@ -968,7 +1027,8 @@ export function createInput(options) {
+ 					el,
+ 					id: ev.pointerId,
+ 					conn: s.conn,
+-					surface: s.surface
++					surface: s.surface,
++					mouse
+ 				};
+ 			} catch {}
+ 		}
+@@ -979,18 +1039,31 @@ export function createInput(options) {
+ 	
+ 	
+ 	on("lostpointercapture", (ev) => {
+-		if (captured && ev.pointerId === captured.id) captured = null;
++		const c = captured;
++		if (!c || ev.pointerId !== c.id) return;
++		if (ev.target !== c.el && c.el.isConnected) return;
++		captured = null;
++		if (c.mouse) releaseMouseButtons(c.conn);
+ 	});
+ 	on("pointerup", (ev) => {
+ 		
+ 		const s = swallow.has(ev) || touchPath.has(ev.pointerId) ? null : target(ev);
++		if (ev.pointerType === "mouse") return mouseButton(ev, s);
+ 		if (!s) return;
+-		const btn = BTN[ev.button];
++		const btn = ev.button < 3 ? BTN[ev.button] : undefined;
+ 		if (btn !== undefined) engine.pointerButton(s.conn, now(), btn, false);
+ 		ev.preventDefault();
+ 	});
++	function cancelMouseDefault(ev) {
++		// Captured gestures can emit auxclick over host chrome after release.
++		if (mouseDelivered.has(ev.button)) ev.preventDefault();
++	}
++	on("auxclick", (ev) => {
++		if (!ev.pointerType || ev.pointerType === "mouse") cancelMouseDefault(ev);
++	});
+ 	on("contextmenu", (ev) => {
+-		if (view.surfaceOf(ev.target)) ev.preventDefault();
++		if (ev.pointerType === "mouse" || (!ev.pointerType && ev.button === 2)) cancelMouseDefault(ev);
++		else if (view.surfaceOf(ev.target)) ev.preventDefault();
+ 	});
+ 	on("wheel", (ev) => {
+ 		const s = target(ev);
+@@ -1054,6 +1127,7 @@ export function createInput(options) {
+ 				if (ev.role !== ROLE_TOPLEVEL) forget((a) => a.conn === ev.conn && a.surface === ev.surface, true);
+ 				break;
+ 			case "disconnect":
++				for (const [button, owner] of mouseHeld) if (owner === ev.conn) mouseHeld.delete(button);
+ 				textInput.delete(ev.conn);
+ 				if (hovered === ev.conn) hovered = 0;
+ 				for (const [id, p] of points) if (p.conn === ev.conn) points.delete(id);
+@@ -1105,6 +1179,8 @@ export function createInput(options) {
+ 			points.clear();
+ 			touchPath.clear();
+ 			overHeld.clear();
++			mouseHeld.clear();
++			mouseDelivered.clear();
+ 			release();
+ 			lockWant = null;
+ 			if (locked) releaseLock();

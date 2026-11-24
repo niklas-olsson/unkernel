@@ -162,6 +162,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  wland@0.1.0-261124-3c987e5: 848b3dd230c399659d311a066a1527397b8e4092401a50d0684b6ca99ed3ee43
+
 importers:
 
   .:
@@ -222,7 +225,7 @@ importers:
         version: 8.3.8(@types/node@24.19.2)(jiti@2.7.0)
       wland:
         specifier: 0.1.0-261124-3c987e5
-        version: 0.1.0-261124-3c987e5
+        version: 0.1.0-261124-3c987e5(patch_hash=848b3dd230c399659d311a066a1527397b8e4092401a50d0684b6ca99ed3ee43)
 
 packages:
 
@@ -1820,7 +1823,7 @@ snapshots:
       fsevents: 2.3.3
       jiti: 2.7.0
 
-  wland@0.1.0-261124-3c987e5: {}
+  wland@0.1.0-261124-3c987e5(patch_hash=848b3dd230c399659d311a066a1527397b8e4092401a50d0684b6ca99ed3ee43): {}
 
   yuku-ast@0.19.0:
     dependencies:
