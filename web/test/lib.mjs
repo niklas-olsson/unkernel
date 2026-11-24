@@ -6,7 +6,7 @@
 // WebSocket and fetch, and Playwright's cached Chromium if there is one
 // (--chrome PATH or CHROME= otherwise).
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,13 +18,14 @@ export const flag = (n) => args.includes(`--${n}`);
 export const verbose = flag("verbose");
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export function findChrome() {
-	const explicit = opt("chrome", process.env.CHROME);
+export function findChrome({ cli = true, headlessShell = true } = {}) {
+	const explicit = cli ? opt("chrome", process.env.CHROME) : process.env.CHROME;
 	if (explicit) return explicit;
 	const base = path.join(homedir(), ".cache/ms-playwright");
 	if (existsSync(base)) {
 		for (const d of readdirSync(base).sort().reverse()) {
-			for (const rel of ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-linux64/chrome"]) {
+			const bins = headlessShell ? ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-linux64/chrome"] : ["chrome-linux64/chrome"];
+			for (const rel of bins) {
 				const p = path.join(base, d, rel);
 				if (existsSync(p)) return p;
 			}
@@ -38,10 +39,10 @@ export function findChrome() {
  * build:web`, or the `output` directory), or with `dev` the Vite dev
  * server. `env` adds variables. Resolves once it answers; kill() stops it.
  */
-export async function startServer({ port, host, dev = flag("dev"), env = {}, output = path.join(webDir, ".output") }) {
+export async function startServer({ port, host, dev = flag("dev"), env = {}, output = path.join(webDir, ".output"), log = verbose }) {
 	const entry = path.join(output, "server/index.mjs");
 	let child;
-	const stdio = ["ignore", verbose ? "inherit" : "ignore", "inherit"];
+	const stdio = ["ignore", log ? "inherit" : "ignore", "inherit"];
 	const allEnv = { ...process.env, ...env };
 	if (dev) {
 		const vite = path.join(webDir, "node_modules/vite/bin/vite.js");
@@ -65,25 +66,53 @@ export async function startServer({ port, host, dev = flag("dev"), env = {}, out
 /**
  * A page in a fresh headless Chromium (own profile, removed on close()).
  * page.newTab(name) opens another tab in the same browser (same profile);
- * closing the first page ends the browser.
+ * closing the first page ends the browser. Set sandboxed for regular Chromium
+ * with its sandbox and default graphics; the test defaults remain software-only.
  */
-export async function openPage(name, { shots, profile } = {}) {
-	const dport = 30000 + Math.floor(Math.random() * 20000);
+export async function openPage(name, { shots, profile, sandboxed = false, log = verbose } = {}) {
+	let dport = sandboxed ? 0 : 30000 + Math.floor(Math.random() * 20000);
 	profile ??= path.join(tmpdir(), `kw-chrome-${process.pid}-${name}`);
-	const chrome = spawn(findChrome(), [
-		"--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", `--remote-debugging-port=${dport}`,
+	const binary = findChrome({ cli: !sandboxed, headlessShell: !sandboxed });
+	if (sandboxed && path.basename(binary) === "chrome-headless-shell") throw Error("sandboxed mode needs regular Chromium; set CHROME to its executable");
+	const chrome = spawn(binary, [
+		"--headless=new", ...(sandboxed ? ["--remote-debugging-address=127.0.0.1"] : ["--no-sandbox", "--disable-gpu"]),
+		"--hide-scrollbars", `--remote-debugging-port=${dport}`,
 		`--user-data-dir=${profile}`, "about:blank",
 	], { stdio: ["ignore", "ignore", "pipe"] });
+	let spawnError, diagnostics = "";
+	const exited = new Promise(resolve => {
+		chrome.once("exit", resolve);
+		chrome.once("error", error => { spawnError = error; resolve(); });
+	});
+	chrome.stderr.on("data", chunk => { diagnostics = (diagnostics + chunk).slice(-4000); });
+	const closeChrome = async () => {
+		chrome.kill();
+		await Promise.race([exited, sleep(2000)]);
+		try { rmSync(profile, { recursive: true, force: true }); } catch {}
+	};
 	let target;
-	for (let i = 0; i < 100 && !target; i++) {
+	for (let i = 0; i < 100 && !target && !spawnError && chrome.exitCode === null && chrome.signalCode === null; i++) {
 		await sleep(100);
-		try { target = (await (await fetch(`http://127.0.0.1:${dport}/json/list`)).json()).find((t) => t.type === "page"); } catch {}
+		try {
+			if (!dport) dport = Number(readFileSync(path.join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);
+			if (dport) target = (await (await fetch(`http://127.0.0.1:${dport}/json/list`, { signal: AbortSignal.timeout(500) })).json()).find((t) => t.type === "page");
+		} catch {}
 	}
-	if (!target) { chrome.kill(); throw new Error("chrome did not start"); }
-	const page = await attachTarget(target, name, { shots });
+	if (!target) {
+		await closeChrome();
+		const detail = spawnError?.message ?? diagnostics.trim();
+		throw new Error(`${sandboxed ? "sandboxed Chromium" : "Chromium"} did not start (${binary})${detail ? ":\n" + detail : ""}`);
+	}
+	let page;
+	try {
+		page = await attachTarget(target, name, { shots, log });
+	} catch (error) {
+		await closeChrome();
+		throw error;
+	}
 	page.newTab = async (tabName) => {
 		const t = await (await fetch(`http://127.0.0.1:${dport}/json/new?about:blank`, { method: "PUT" })).json();
-		const tab = await attachTarget(t, tabName, { shots });
+		const tab = await attachTarget(t, tabName, { shots, log });
 		tab.close = async () => {
 			await tab.send("Page.close").catch(() => {});
 			try { tab.ws.close(); } catch {}
@@ -92,15 +121,13 @@ export async function openPage(name, { shots, profile } = {}) {
 	};
 	page.close = async () => {
 		try { page.ws.close(); } catch {}
-		chrome.kill();
-		await Promise.race([new Promise((r) => chrome.once("exit", r)), sleep(2000)]);
-		try { rmSync(profile, { recursive: true, force: true }); } catch {}
+		await closeChrome();
 	};
 	return page;
 }
 
 /** A DevTools session on one page target. */
-async function attachTarget(target, name, { shots } = {}) {
+async function attachTarget(target, name, { shots, log = verbose } = {}) {
 	const ws = new WebSocket(target.webSocketDebuggerUrl);
 	await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
 	let id = 0;
@@ -113,12 +140,12 @@ async function attachTarget(target, name, { shots } = {}) {
 		if (msg.method === "Runtime.consoleAPICalled") {
 			const line = msg.params.args.map((a) => a.value ?? a.description).join(" ");
 			consoleLines.push(line);
-			if (verbose) console.error(`  [${name} console]`, line);
+			if (log) console.error(`  [${name} console]`, line);
 		}
 		if (msg.method === "Runtime.exceptionThrown") {
 			const d = msg.params.exceptionDetails;
 			exceptions.push(d.exception?.description ?? d.text);
-			if (verbose) console.error(`  [${name} exception]`, d.exception?.description ?? d.text);
+			if (log) console.error(`  [${name} exception]`, d.exception?.description ?? d.text);
 		}
 	};
 	const send = (method, params = {}) => new Promise((r) => {

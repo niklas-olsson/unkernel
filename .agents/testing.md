@@ -96,6 +96,11 @@ command, interleaved medians).
 
 ## Profiling CPUs and worker mode
 
+For a browser guest command or a Wayland window, the [desktop workload
+trace](../README.md#trace-a-desktop-workload) captures guest PC samples
+between two snapshots of the same boot. `node --test test/desktop-trace*.test.*`
+checks the interval counters, trace bounds and start/stop lifecycle.
+
 Two twins time everyday guest work (command latency, a shell loop,
 fork+exec, gzip, sort, sha256sum, `find /usr`, and three parallel ones:
 4 loops, 8 sort pipelines, one loop per CPU of the widest configuration)

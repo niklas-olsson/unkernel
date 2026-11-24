@@ -53,6 +53,7 @@ import { KW } from "./kw.ts";
 import { ui$ } from "./store.ts";
 import type { KernelHandle, VsockConnection, VsockListener } from "./sdk.ts";
 import type { DndBridge, Wland } from "wland/client";
+import type { CommitEvent } from "wland/engine";
 import { getGpuLast, gpuSource, handleSource, stats, type Stats } from "./wayland/buffers.ts";
 import { createCopyOut, withholdPaths } from "./wayland/copyout.ts";
 import { createHost } from "./wayland/host.ts";
@@ -75,7 +76,7 @@ const popups = new Set<string>();
  * Listen for wland's relay and show its apps (see the top). Returns the stop
  * function, or null when the kernel has no vsock or no kwshm.
  */
-export function attachWayland(vm: KernelHandle, log: (line: string) => void): (() => void) | null {
+export function attachWayland(vm: KernelHandle, log: (line: string) => void, onCommit?: (ev: CommitEvent) => void): (() => void) | null {
 	if (!vm.vsock || !vm.shm) return null;
 	const listener: VsockListener = vm.vsock.listen(WAYLAND_PORT);
 	let stopped = false;
@@ -143,7 +144,7 @@ export function attachWayland(vm: KernelHandle, log: (line: string) => void): ((
 					if (stopped) return;
 					copyOut(ev);
 					if (ev.type === "log") wireLog[wireAt++ % LOG_LINES] = ev.line;
-					else if (ev.type === "commit") stats.commits++;
+					else if (ev.type === "commit") { stats.commits++; onCommit?.(ev); }
 					else if (ev.type === "surface") {
 						if (ev.role === W.ROLE_POPUP) popups.add(`${ev.conn}:${ev.surface}`);
 						else popups.delete(`${ev.conn}:${ev.surface}`);

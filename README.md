@@ -614,6 +614,40 @@ and `cpus: 4` gets most of what more CPUs give (about 3x on parallel work;
 guest memory). `node test/profile.ts` measures your host, and the page's
 `/profile.html` a browser.
 
+### Trace a desktop workload
+
+Build the page once, then record a command in a fresh Debian browser guest.
+The runner starts a local server and Chromium, writes one JSON file, and
+returns the guest command's exit status.
+
+```sh
+pnpm build:web
+node test/desktop-trace.mjs --out trace.json -- /usr/bin/sha256sum /bin/bash
+```
+
+For an interactive capture, open the desktop with `?trace=1&cpus=2`.
+Run `await KW.trace.start("typing")` in the page console, interact with a
+guest window, then run `copy(JSON.stringify(await KW.trace.stop()))`
+in Chromium DevTools. Add a named instant with `KW.trace.mark("editor ready")`.
+The `traceEvents` timeline opens in a Chrome trace viewer. It records
+trusted input event types and host-observed Wayland surface commits on the
+page's clock. A commit is observed after wland has handled it. Physical
+presentation and guest DOM events require their own measurements.
+
+The file includes the page revision, kernel and distro asset names,
+and a `profile` for the sampled interval. `topUserSites` ranks guest code by
+periodic user-time samples. `topInsnSites` ranks it by retired-instruction
+samples. File offsets identify code across address randomization. Check
+dropped samples, missed ticks, and the duration of both profile requests
+before interpreting a short interval. The host timeline retains 2,048
+events and reports how many more it dropped. The SDK's full cumulative
+histogram remains available through `await KW.vm.profile()`.
+
+Only loads with `?trace=1` enable desktop profiling. They sample from boot,
+at 100 Hz per CPU on shared SMP memory and every million retired user
+instructions. A single-CPU unshared kernel supplies instruction samples.
+Use the ordinary page for uninstrumented latency controls.
+
 ### Boot options and helpers
 
 ```js

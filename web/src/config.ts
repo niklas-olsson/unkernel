@@ -27,6 +27,7 @@
 //   ?verbose=1                         write every kernel message to the terminal, in gray
 //                                      (default: kernel messages go to the Kernel log tab, and
 //                                      during boot the newest one shows on the transient line)
+//   ?trace=1                           this load only: sample guest PCs and enable KW.trace
 //   ?data=0                            no data disk. By default (when IndexedDB exists) the data
 //                                      disk, an ext4 fs labelled kwdata, is attached as /dev/wda
 //                                      and kept in IndexedDB (data.ts); the guest's root is an
@@ -322,6 +323,7 @@ export interface Config {
 	/** Worker mode: shared memory for input and frames where it works (?shared=0: messages). */
 	shared: boolean;
 	verbose: boolean;
+	trace: boolean;
 	simulate: string[];
 	/** Seconds the tab is hidden before the page suspends the machine by itself (0: at once), or null: never (?autosuspend=, autosuspend.ts). */
 	autosuspend: number | null;
@@ -588,6 +590,7 @@ export function readConfig(search: string = location.search, saved: Record<strin
 		cpuSuggested,
 		shared: params.get("shared") !== "0",
 		verbose: params.get("verbose") === "1",
+		trace: url.get("trace") === "1",
 		simulate: (url.get("simulate") || "").split(",").filter(Boolean),
 		autosuspend: autosuspend.delayS,
 		autosuspendParam: autosuspend.value,

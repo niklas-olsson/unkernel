@@ -1655,6 +1655,7 @@ export function start(): void {
 		};
 		const common = {
 			cmdline: cfg.cmdline, memoryMiB: cfg.memMiB, memoryFallbackMiB: cfg.memFallbackMiB, jit: cfg.jit,
+			profile: cfg.trace ? { hz: 100, insns: 1_000_000 } : undefined,
 			consoleSize: { cols: term.cols, rows: term.rows },
 			onOutput: consoleWrite, log, onProgress,
 			display: cfg.display ? display.size : false, onDisplay: display.onDisplay, onInput: display.onInput,
@@ -1775,10 +1776,16 @@ export function start(): void {
 		void vm.exited.then(() => { vmExited = true; wasi?.close(); });
 		g.vm = vm;
 		KW.vm = vm;
+		const trace = cfg.trace ? (await import("./desktop-trace.ts")).createDesktopTrace(vm, {
+			...__KW_BUILD__, bootAsset: new URL(import.meta.url).pathname, kernelAsset: kernelUrl, distro: cfg.guest,
+			distroAsset: cfg.distro?.url ?? null, imageId: cfg.distro?.imageId ?? null,
+			worker: cfg.worker, transport: vm.transport, jit: cfg.jit, memoryMiB: vm.memoryMiB, userAgent: navigator.userAgent,
+		}, window) : undefined;
+		KW.trace = trace?.api;
 		// The guest preview (preview.ts) relays /vm/<id>/<port>/ to vm.fetch().
 		attachPreview(vm);
 		// Wayland apps (wayland.ts): wland's relay connects to vsock port 1023 when the guest's first Wayland app starts.
-		const stopWayland = attachWayland(vm, (l) => ui.hostLog(l));
+		const stopWayland = attachWayland(vm, (l) => ui.hostLog(l), trace?.onCommit);
 		KW.wayland = waylandApi;
 		// The guest's open and xdg-open (open.ts): its URLs, in the preview or a
 		// new tab once the user confirms. Added once the kernel runs rather than
