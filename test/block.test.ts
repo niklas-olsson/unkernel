@@ -656,9 +656,10 @@ test("HttpBase read-ahead: chunks arrive streamed, so a read waits only for its 
 		const b = await HttpBase.open(s.url, { prefetch: false });
 		await b.read(4 * CS, 4096);   // chunk 4: lazy (chunk 3 is not here)
 		await b.read(5 * CS, 4096);   // chunk 5: lazy, after chunk 4: read-ahead of chunks 6-9, held after chunk 6
-		assert.deepEqual(s.ranges.at(-1), [6 * CS, 10 * CS]);
+		// Wait for streamed bytes before checking what the server received.
 		const r6 = await Promise.race([Promise.resolve(b.read(6 * CS, 4096)), new Promise((r) => setTimeout(() => r("timeout"), 2000))]);
 		assert.deepEqual(r6, s.img.subarray(6 * CS, 6 * CS + 4096));
+		assert.deepEqual(s.ranges.at(-1), [6 * CS, 10 * CS]);
 		const r7 = b.read(7 * CS, 4096);
 		assert.ok(r7 instanceof Promise);
 		gate.resolve();
