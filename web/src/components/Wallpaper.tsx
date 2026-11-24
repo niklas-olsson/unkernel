@@ -9,10 +9,10 @@
 // the one before, which goes once the fade is over; a photo gets the dim
 // (a black overlay) over it. Nothing is drawn for the default.
 // WallpaperCredit: the photo's credit, its author's name linking to its
-// Unsplash page, small and faint in the workspace's bottom right corner
-// (Workspace.tsx renders it in #workspace at z-index 0, under every window, above
-// the Dock's strip, so it takes clicks; style.css .wp-credit, tinted by
-// data-wallpaper). From the photo's data at hand (desktop.ts Shown.photo: the
+// Unsplash page, small and faint in the page's bottom right corner (Dock.tsx
+// renders it in #dock's strip, under the pill; in compact mode, where the pill
+// reaches the corner, Workspace.tsx does in #workspace, under every window;
+// style.css .wp-credit, tinted by data-wallpaper). From the photo's data at hand (desktop.ts Shown.photo: the
 // curated list, More's list, the cache's header), no request; none for
 // presets, the default or a photo without an author.
 import { useEffect, useRef, useState } from "react";

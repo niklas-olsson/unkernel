@@ -11,7 +11,8 @@
 // output, the workspace's size; their windows are WM windows, wayland.ts).
 // A right click or long press on the bare workspace opens the desktop's menu
 // (DesktopMenu.tsx, a portal into the body).
-// Under the windows, the wallpaper photo's credit (Wallpaper.tsx), and the
+// Under the windows, the resource widget (Widget.tsx; in compact mode the
+// wallpaper photo's credit instead, Wallpaper.tsx), and the
 // snap preview of a window being moved (SnapPreview.tsx: at that window's
 // z-index and before it in the DOM, so just under it).
 //
@@ -36,6 +37,7 @@ import { DesktopMenu } from "./DesktopMenu.tsx";
 import { SnapPreview } from "./SnapPreview.tsx";
 import { TerminalTabs } from "./TerminalTabs.tsx";
 import { WallpaperCredit } from "./Wallpaper.tsx";
+import { ResourcesWidget } from "./Widget.tsx";
 import { Window } from "./Window.tsx";
 
 /** Below this viewport width (px) the desktop is compact: every window maximized, one shown. */
@@ -79,7 +81,8 @@ export function Workspace() {
 	}, []);
 	return (
 		<div id="workspace" ref={ref} className="absolute isolate top-[calc(var(--st)+var(--tb-space,0px))] right-(--sr) bottom-0 left-(--sl)">
-			<WallpaperCredit />
+			{s.compact && <WallpaperCredit />}
+			{!s.compact && <ResourcesWidget />}
 			<SnapPreview />
 			{drawn(s, fx).map(({ win: w, z, ghost }) => (
 				<Window key={w.id} win={w} z={z} focused={!ghost && s.focused === w.id} visible={ghost || isVisible(w, s)} closing={ghost} compact={s.compact} area={s.area} />

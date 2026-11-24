@@ -22,7 +22,7 @@
 //     ui.confirmReboot()), and while in safe mode with a distro, Leave safe
 //     mode (asks first). The items keep the old power menu's ids
 //     (#tb-suspend, #tb-resume, #tb-reboot).
-// - Resources (#tb-res), opened by hovering or clicking a resource meter
+// - Resources (#tb-res), opened by clicking a resource meter
 //   (#tb-cpu…#tb-gpu: that resource's row is marked): every resource's
 //   sparkline and facts (Glance.tsx Resources; the sampler runs at the full
 //   rate while it is open), then System… (#tb-res-system: the Overview).

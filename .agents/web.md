@@ -638,13 +638,17 @@ deploying the page needs no kernel toolchain.
   `#tb-resume`, `#tb-reboot`: "Reboot to apply" while Settings' options
   differ from this boot's, and it asks first; Leave safe mode in safe
   mode). Boot options stay in Settings.
-- Resources popover (`ControlCenter.tsx`, `#tb-res`), opened by hovering
-  or clicking a meter (that resource's row marked), under the last meter:
+- Resources popover (`ControlCenter.tsx`, `#tb-res`), opened by clicking
+  a meter (that resource's row marked), under the last meter:
   every resource's sparkline and facts (`Glance.tsx`; `#tb-gpu` marks both
   GPU rows, GPU for guest GL and Vulkan), then System…
   (`#tb-res-system`). One of the two popovers is open at a time.
-- Resources (`stats.ts`): one sampler for the meters, the Resources
-  popover and System's Overview, never two reads at once: a `vm.exec()` of a POSIX
+- Resource widget (`Widget.tsx`, `#desk-res`), on the wallpaper in the
+  workspace's top right corner, under the windows: a sparkline and a value
+  per resource, hidden until its button (`#desk-res-toggle`) shows it (kept
+  in `kw.widget`, `widget.ts`); none in compact mode.
+- Resources (`stats.ts`): one sampler for the meters, the resource
+  widget, the Resources popover and System's Overview, never two reads at once: a `vm.exec()` of a POSIX
   sh snippet of builtins only (no program started, nothing read from the
   image) that prints the guest's `/proc` (every few samples also `df`),
   with the SDK's host counters, guest GL's (`vm.gl`) and guest Vulkan's
@@ -656,7 +660,7 @@ deploying the page needs no kernel toolchain.
   and the renderer's share of the page's time (its parse, translate and
   encode ms); a new renderer after a device loss gives no rates across it.
   Its errors and device losses show in red. A light sample every 5 s
-  for the meters, a full one every 2 s while the Resources popover or the
+  for the meters and the widget, a full one every 2 s while the Resources popover or the
   Overview shows; only while the page is visible and the machine runs; the
   last 90 samples kept for the charts.
 - Shortcuts HUD (`KeysHud.tsx`): 180 ms after the prefix is armed, a
@@ -709,8 +713,8 @@ deploying the page needs no kernel toolchain.
   the Cache API (`kw-wallpaper-v1`) as the next load's placeholder, and
   `kw.wallpaper-hint` lets index.html paint it first. The luma of its top
   band, under the top bar, sets `data-wallpaper` (light or dark) for the
-  chrome. Photos have Dim and Blur and a credit in the workspace's bottom
-  right.
+  chrome. Photos have Dim and Blur and a credit in the page's bottom
+  right corner, in the Dock's strip (in compact mode the workspace's).
 - The bare desktop's menu (`DesktopMenu.tsx`, a right click or a long
   press on `#desktop` or `#workspace` itself): New Terminal, Settings…,
   System…, Change Wallpaper…, Apps….

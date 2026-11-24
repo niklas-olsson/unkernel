@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // The resource glance: the top bar's Resources popover (ControlCenter.tsx
-// #tb-res, opened by hovering or clicking a resource meter: TopBar.tsx
+// #tb-res, opened by clicking a resource meter: TopBar.tsx
 // #tb-cpu, #tb-mem, #tb-disk, #tb-net, #tb-gpu, whose row is then marked
 // and scrolled into view; #tb-gpu marks both GPU rows). One row per
 // resource: its icon in its colour (Charts.tsx TONE, as in the Overview),

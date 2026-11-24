@@ -40,10 +40,8 @@
 //   leaves the item and the popover), a click keeps it, a second click
 //   closes it. The meters open their own popover, Resources
 //   (ControlCenter.tsx, #tb-res: every resource's sparkline and facts,
-//   System…), under the last meter: under the mouse they show it with their
-//   row marked (it goes when the mouse leaves the meters and the popover), a
-//   click keeps it (a second click closes it, a click on another meter marks
-//   that one). One of the two is open at a time. The
+//   System…), under the last meter: a click shows it with that row marked (a
+//   second click closes it, a click on another meter marks that one). One of the two is open at a time. The
 //   figures are stats.ts's light samples (useStats("lite"): every
 //   LITE_INTERVAL ms while the machine runs and the page shows, faster while
 //   the Overview or Resources is open); before the first one, and while
@@ -57,7 +55,7 @@
 // covers it on phones; the launcher, the dialogs and the toast
 // are over the whole #app.
 // A press on the bar never moves the keyboard focus (the terminal keeps it).
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { windowDetail } from "../appwindows.ts";
 import { fmtFps, fmtPct, fmtRateShort, fmtSizeShort } from "../format.ts";
 import { KW } from "../kw.ts";
@@ -88,17 +86,16 @@ function BarButton({ id, title, label, cmd, on, tone, onClick, className = "", c
 }
 
 /**
- * A resource's meter: under the mouse it shows Resources with its row marked, a click keeps it
- * (or closes a kept one); a press keeps the focus where it is.
+ * A resource's meter: a click shows Resources with its row marked (or closes it); a press keeps the
+ * focus where it is. (The desktop's widget, Widget.tsx, has the resources too.)
  */
-function ResButton({ res, open, title, label, tone, onToggle, onHover, className = "", children }: {
-	res: ResKey; open: boolean; title: string; label: string; tone?: string; onToggle: (res: ResKey, kb: boolean) => void; onHover: (res: ResKey) => void; className?: string; children: ReactNode;
+function ResButton({ res, open, title, label, tone, onToggle, className = "", children }: {
+	res: ResKey; open: boolean; title: string; label: string; tone?: string; onToggle: (res: ResKey, kb: boolean) => void; className?: string; children: ReactNode;
 }) {
 	return (
 		<button id={`tb-${res}`} type="button" title={open ? undefined : title} aria-label={label} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? "tb-res" : undefined}
 			data-meter={res} data-pop="" data-tone={tone} className={`tb-btn tb-meter ${className}`}
 			onMouseDown={(e) => e.preventDefault()}
-			onPointerEnter={(e) => { if (e.pointerType === "mouse") onHover(res); }}
 			onKeyDown={(e) => { if (e.key === "ArrowDown" && !open) { e.preventDefault(); onToggle(res, true); } }}
 			onClick={(e) => onToggle(res, e.detail === 0)}>
 			{children}
@@ -253,9 +250,9 @@ export function TopBar() {
 	// ---- the popovers (ControlCenter.tsx): the Control Center (#tb-cc) and Resources (#tb-res) ----
 	// One at a time. view: which; res: the meter whose row is marked (Resources); from: the control it opened from
 	// (Esc after a keyboard open goes back to it); pinned: opened by a click or a key, so it stays until closed. A
-	// hover (the mouse) on a meter opens Resources, on the item the Control Center, unpinned: it goes when the mouse
-	// leaves those controls and the popover; a click then pins it. Under the mouse, the other kind of control over an
-	// open popover switches to its own, pinned or not as the one it replaces, as a menu bar does.
+	// hover (the mouse) on the Control Center's item opens it unpinned: it goes when the mouse leaves the bar's popover
+	// controls and the popover; a click then pins it. Over an open Resources it switches to the Control Center, pinned
+	// as the one it replaces, as a menu bar does.
 	const [pop, setPop] = useState<{ view: "cc" | "res"; res: ResKey | null; from: string; kb: boolean; pinned: boolean } | null>(null);
 	const popOpen = !!pop;
 	/** Where the focus was when it opened (not in the bar), for Esc after the user tabbed into a mouse-opened one. */
@@ -268,9 +265,6 @@ export function TopBar() {
 	const toggleCc = (kb: boolean) => setPop((c) => (c?.view === "cc" && c.pinned ? null : { view: "cc", res: null, from: "tb-status", kb, pinned: true }));
 	const hoverCc = () => setPop((c) => (c?.view === "cc" ? c : { view: "cc", res: null, from: "tb-status", kb: false, pinned: !!c?.pinned }));
 	const toggleRes = (res: ResKey, kb: boolean) => setPop((c) => (c?.view === "res" && c.res === res && c.pinned ? null : { view: "res", res, from: `tb-${res}`, kb, pinned: true }));
-	const hoverRes = useCallback((res: ResKey) => setPop((c) =>
-		c?.view === "res" ? (c.res === res ? c : { ...c, res })
-			: { view: "res", res, from: `tb-${res}`, kb: false, pinned: !!c?.pinned }), []);
 	const hovering = !!pop && !pop.pinned;
 	useEffect(() => {
 		if (!hovering) return;
@@ -330,23 +324,23 @@ export function TopBar() {
 						<ErrIcon size={14} />{errors > 0 && <span className="font-mono text-[12px]">{errors}</span>}
 					</BarButton>
 				)}
-				<ResButton res="cpu" open={pop?.view === "res" && pop.res === "cpu"} title={cpuText} label={cpuText} tone={tone(cpu)} onToggle={toggleRes} onHover={hoverRes}>
+				<ResButton res="cpu" open={pop?.view === "res" && pop.res === "cpu"} title={cpuText} label={cpuText} tone={tone(cpu)} onToggle={toggleRes}>
 					<CpuIcon size={14} /><Bars values={[cpu]} />
 				</ResButton>
-				<ResButton res="mem" open={pop?.view === "res" && pop.res === "mem"} title={memText} label={memText} tone={tone(memShare)} onToggle={toggleRes} onHover={hoverRes}>
+				<ResButton res="mem" open={pop?.view === "res" && pop.res === "mem"} title={memText} label={memText} tone={tone(memShare)} onToggle={toggleRes}>
 					<RamIcon size={14} /><Bars values={[memShare]} />
 				</ResButton>
 				{disk && (
-					<ResButton res="disk" open={pop?.view === "res" && pop.res === "disk"} className="tb-wide" tone={tone(diskShare)} label={`Data disk: ${used} in use`} onToggle={toggleRes} onHover={hoverRes}
+					<ResButton res="disk" open={pop?.view === "res" && pop.res === "disk"} className="tb-wide" tone={tone(diskShare)} label={`Data disk: ${used} in use`} onToggle={toggleRes}
 						title={`Data disk (/data): ${used} in use, ${disk.saved ? "saved in this browser" : "in memory only"}; counts blocks ever written, df in the guest is exact`}>
 						<DiskIcon size={14} /><Bars values={[diskShare]} />
 					</ResButton>
 				)}
-				<ResButton res="net" open={pop?.view === "res" && pop.res === "net"} className={`tb-wide ${net ? "" : "tb-off"}`} title={netText} label={netText} onToggle={toggleRes} onHover={hoverRes}>
+				<ResButton res="net" open={pop?.view === "res" && pop.res === "net"} className={`tb-wide ${net ? "" : "tb-off"}`} title={netText} label={netText} onToggle={toggleRes}>
 					<NetIcon off={!net} size={14} />{net && <Bars values={[netLevel(rx), netLevel(tx)]} />}
 				</ResButton>
 				{(gpu || vk) && (
-					<ResButton res="gpu" open={pop?.view === "res" && pop.res === "gpu"} className="tb-wide" title={gpuText} label={gpuText} onToggle={toggleRes} onHover={hoverRes}>
+					<ResButton res="gpu" open={pop?.view === "res" && pop.res === "gpu"} className="tb-wide" title={gpuText} label={gpuText} onToggle={toggleRes}>
 						<GpuIcon size={14} /><Bars values={[gpuBusy]} />
 					</ResButton>
 				)}

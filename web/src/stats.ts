@@ -32,7 +32,7 @@
 //   is nothing to read.
 // - Users: useStats() (full: the Overview while System's window shows it,
 //   the top bar's Resources while it is open) samples every INTERVAL ms with the
-//   full snippet; useStats("lite") (the top bar, always mounted) samples
+//   full snippet; useStats("lite") (the top bar, always mounted, and the desktop's widget) samples
 //   every LITE_INTERVAL ms with the light one while no full user is
 //   mounted. Either way it is one sampler: never two reads at once, one
 //   history. A full user that arrives during a light read gets its full

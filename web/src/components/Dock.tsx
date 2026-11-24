@@ -134,6 +134,7 @@ import { DockStack, type StackClose } from "./DockStack.tsx";
 import {
 	AppGlyph, DesktopIcon, GridIcon, MetaIcon,
 } from "./icons.tsx";
+import { WallpaperCredit } from "./Wallpaper.tsx";
 import { TileProgress } from "./Installer.tsx";
 import { KeyHint } from "./KeyHint.tsx";
 import { Menu, type MenuClose, type MenuEntry } from "./Menu.tsx";
@@ -813,6 +814,7 @@ export function Dock() {
 
 	return (
 		<footer id="dock" ref={root} aria-label="Dock" className="relative flex flex-none items-center justify-center select-none">
+			{!compact && <WallpaperCredit />}
 			<div id="dock-label" ref={label} aria-hidden="true"><span /><span /></div>
 			{menu && spec && <Menu id="dock-tile-menu" label={spec.header} header={spec.header} items={spec.items} anchor={menu.rect} onClose={closeMenu} />}
 			{stack && <DockStack key={stack.group.id} group={stack.group} tile={stack.el} top={stack.top} kb={stack.kb} quick={stack.quick} inside={(t) => !!stack.el.contains(t as Node)} onClose={closeStack} />}

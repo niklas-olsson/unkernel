@@ -69,8 +69,8 @@
 	   launcher, the shortcuts HUD while the prefix is armed (KeysHud.tsx),
 	   the toast, and the menus (Menu.tsx, portaled into <body>);
 	   the dialogs (Dialog.tsx) are native modal <dialog>s, in the top layer
-	   over all of it. In the workspace (#workspace, isolated): the wallpaper
-	   photo's credit, the windows (wm.ts and wmfx.ts set theirs inline: 2, 4,
+	   over all of it. In the workspace (#workspace, isolated): the resource
+	   widget or the wallpaper photo's credit, the windows (wm.ts and wmfx.ts set theirs inline: 2, 4,
 	   6... by z-order, a closing ghost on an odd one, the snap preview at its
 	   window's), and wland's container over every window (WaylandOutput.tsx). In a
 	   window (.wm-win): its resize edges, a Wayland window's element over
@@ -292,7 +292,8 @@
 .wallpaper > .wp-in { animation: wp-in .45s ease-out both; }
 .wallpaper > .wp-dim { transition: background-color .2s; }
 @keyframes wp-in { from { opacity: 0; } }
-/* The photo's credit (Wallpaper.tsx WallpaperCredit, in #workspace under the
+/* The photo's credit (Wallpaper.tsx WallpaperCredit, in the Dock's strip at the
+   page's corner, under the pill; in compact mode in #workspace, under the
    windows): plain small text, faint on a dark wallpaper, dark on a light one.
    Not selectable: a long press on the empty desktop would otherwise select
    it, the only text there. */
@@ -302,9 +303,28 @@
 	font-size: 10.5px; line-height: 1.3; color: rgb(255 255 255 / 38%); text-decoration: none;
 	transition: color .15s; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none;
 }
+#dock > .wp-credit { right: calc(10px + var(--sr)); bottom: calc(6px + var(--sb)); max-width: 20%; }
 .wp-credit:hover, .wp-credit:focus-visible { color: rgb(255 255 255 / 80%); }
 :root[data-wallpaper="light"] .wp-credit { color: rgb(0 0 0 / 42%); }
 :root[data-wallpaper="light"] .wp-credit:hover, :root[data-wallpaper="light"] .wp-credit:focus-visible { color: rgb(0 0 0 / 78%); }
+/* The desktop's resource widget (Widget.tsx): no card, its text and lines
+   straight on the wallpaper, as its own white (or, on a light one, black)
+   tints with a soft shadow to read over a busy photo. */
+.desk-widget {
+	position: absolute; top: 4px; right: 0; z-index: var(--z-credit);
+	max-height: calc(100% - 12px); overflow: hidden;
+	--color-fg: rgb(255 255 255 / 95%); --color-muted: rgb(255 255 255 / 80%); --color-faint: rgb(255 255 255 / 62%);
+	--color-line-strong: transparent;
+	text-shadow: 0 1px 3px rgb(0 0 0 / 55%);
+}
+.desk-widget svg { filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)); }
+/* The history fades in from the left, so the column has no left edge. */
+.desk-spark { -webkit-mask-image: linear-gradient(to right, transparent, #000 80%); mask-image: linear-gradient(to right, transparent, #000 80%); }
+:root[data-wallpaper="light"] .desk-widget {
+	--color-fg: rgb(0 0 0 / 88%); --color-muted: rgb(0 0 0 / 72%); --color-faint: rgb(0 0 0 / 58%);
+	text-shadow: 0 1px 3px rgb(255 255 255 / 45%);
+}
+:root[data-wallpaper="light"] .desk-widget svg { filter: none; }
 
 /* ---- the windows (components/Workspace.tsx, Window.tsx, SnapPreview.tsx; wm.ts) ----
    A window: slightly rounded, a subtle border and shadow; the focused one a
