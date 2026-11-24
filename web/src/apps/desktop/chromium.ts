@@ -33,6 +33,15 @@ function scaleFlag(): string {
 	return ` --force-device-scale-factor=${scale}`;
 }
 
+export const chromiumRuntime = {
+	needs: { net: true, wayland: true },
+	packages: { debian: ["chromium", "libegl1", "libegl-mesa0", "fonts-liberation", "dbus-daemon"] },
+} satisfies Pick<TerminalApp, "needs" | "packages">;
+
+export function chromiumCommand(flags: string): string {
+	return `dbus-run-session -- chromium --no-first-run --no-default-browser-check ${flags}${scaleFlag()}`;
+}
+
 export default {
 	id: "chromium",
 	title: "Chromium",
@@ -40,10 +49,9 @@ export default {
 	// Chromium's mark: three segments round a centre (crafted).
 	icon: { svg: '<path d="M3.7 6.42A10 10 0 0 1 20.98 7.6H12a4.4 4.4 0 0 0-3.81 6.6Z"/><path opacity=".75" d="M20.98 7.6a10 10 0 0 1-9.66 14.38l4.49-7.78A4.4 4.4 0 0 0 12 7.6Z"/><path opacity=".5" d="M11.32 21.98A10 10 0 0 1 3.7 6.42l4.49 7.78a4.4 4.4 0 0 0 7.62 0Z"/><circle cx="12" cy="12" r="3.4"/>' },
 	colors: ["#60a5fa", "#1e3a8a"],
-	needs: { net: true, wayland: true },
-	packages: { debian: ["chromium", "libegl1", "libegl-mesa0", "fonts-liberation", "dbus-daemon"] },
+	...chromiumRuntime,
 	// Read when it launches (run.sh): the scale for the workspace then.
 	get commands() {
-		return [`dbus-run-session -- chromium --no-first-run --no-default-browser-check --disable-background-networking${scaleFlag()}`];
+		return [chromiumCommand("--disable-background-networking")];
 	},
 } satisfies TerminalApp;

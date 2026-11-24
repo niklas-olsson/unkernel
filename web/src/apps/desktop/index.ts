@@ -7,6 +7,7 @@
 import { defineGroup } from "../types.ts";
 import thunar from "./thunar.ts";
 import chromium from "./chromium.ts";
+import discord from "./discord.ts";
 import l3afpad from "./l3afpad.ts";
 import galculator from "./galculator.ts";
 import x11 from "./x11.ts";
@@ -18,4 +19,4 @@ export default defineGroup({
 	// Two windows, one over the other.
 	icon: { svg: '<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/><rect x="3" y="9" width="14" height="12" rx="2"/><path d="M3 13h14"/></g>' },
 	colors: ["#14b8a6", "#134e4a"],
-}, [chromium, thunar, l3afpad, galculator, x11, xfce, xpaint]);
+}, [chromium, discord, thunar, l3afpad, galculator, x11, xfce, xpaint]);
