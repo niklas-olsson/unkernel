@@ -295,8 +295,11 @@ Node's `node:wasi`.
   (smp.md).
 - The timer is a one-shot deadline, checked against the host monotonic
   clock.
-- Everything is checked when a slice ends and in `arch_cpu_idle`
-  (`wasm_idle(timeout)`: a `poll_oneoff` on stdin and the deadline). A
+- Everything is checked when a slice ends, in `arch_cpu_idle`
+  (`wasm_idle(timeout)`: a `poll_oneoff` on stdin and the deadline) and
+  every 128 calls of `cond_resched()` (irq.c), so that a kernel loop that
+  waits for another task lets it run (direct reclaim, until the OOM victim
+  has exited). A
   slice is 200k user instructions of the CPU, not of one `kw_run` call:
   `cpu->budget` is refilled only after `KW_EV_BUDGET`/`KW_EV_INTERRUPT`,
   and each syscall and page fault costs `KW_ENTRY_COST` (1000) of it.
@@ -317,7 +320,8 @@ Node's `node:wasi`.
   runs and every Tiny SRCU `synchronize_srcu()` hangs: inotify `close()`,
   systemd).
 - A single long stay in the kernel (one big syscall) delays these checks
-  until it returns (status.md).
+  until it returns or calls `cond_resched()` (status.md; what SMP polls
+  besides: smp.md).
 
 ## SMP
 

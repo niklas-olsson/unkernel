@@ -1,0 +1,153 @@
+From 04a4a6d9dcf0b5b8f105c0e6b17e6d3b226fa5ab Mon Sep 17 00:00:00 2001
+From: kernel-wasm <kernel-wasm@localhost>
+Date: Tue, 24 Nov 2026 17:43:08 +0000
+Subject: [PATCH] wasm: poll pending interrupts in cond_resched()
+
+There is no asynchronous interrupt delivery: the timer tick is polled
+when user mode traps into the kernel and in the idle loop. A loop that
+stays in the kernel never sees the tick, need_resched is never set, and
+its cond_resched() lets nobody else run. SMP also polls when interrupts
+are enabled and in cpu_relax(), but only for IPIs and the host's events:
+a CPU's timer alone does not count.
+
+Direct reclaim is such a loop. When a task that is not the OOM victim
+invokes the OOM killer, out_of_memory() then finds a victim that has not
+exited yet and reports progress, so the allocator retries for as long as
+the victim does not run. The OOM reaper does not help, as a timer starts
+it. A pipeline whose writer ran out of memory so spun at 100% CPU for
+ever after "Out of memory: Killed process"; on SMP when the victim had to
+run on the same CPU.
+
+Let an arch take its pending interrupts in __cond_resched(), and do that
+every 128 calls (a poll reads the host's clock). Copying pages in tmpfs,
+which calls cond_resched() for every one, is at most about 2% slower.
+
+Based on a patch by John Henry.
+
+Link: https://github.com/pithings/unkernel/issues/6
+---
+ arch/wasm/include/asm/processor.h |  7 ++++
+ arch/wasm/kernel/irq.c            | 59 ++++++++++++++++++++++++++++---
+ kernel/sched/core.c               |  9 +++++
+ 3 files changed, 71 insertions(+), 4 deletions(-)
+
+diff --git a/arch/wasm/include/asm/processor.h b/arch/wasm/include/asm/processor.h
+index 03757058309..7898bac7459 100644
+--- a/arch/wasm/include/asm/processor.h
++++ b/arch/wasm/include/asm/processor.h
+@@ -40,6 +40,13 @@ void kw_cpu_relax(void);
+ #define cpu_relax()	barrier()
+ #endif
+ 
++/*
++ * A loop in the kernel sees its CPU's timer tick, and so lets other tasks
++ * run, only where it polls: cond_resched() does (irq.c).
++ */
++void kw_cond_resched_poll(void);
++#define arch_cond_resched_poll kw_cond_resched_poll
++
+ struct thread_struct {
+ 	int (*fn)(void *);	/* kernel thread entry (until first run) */
+ 	void *fn_arg;
+diff --git a/arch/wasm/kernel/irq.c b/arch/wasm/kernel/irq.c
+index c14aed445bd..5879579bf45 100644
+--- a/arch/wasm/kernel/irq.c
++++ b/arch/wasm/kernel/irq.c
+@@ -2,10 +2,11 @@
+ /*
+  * Interrupts. There is no asynchronous delivery: pending "interrupts" (the
+  * clockevent expiring, host events such as console input) are polled when
+- * user mode traps back into the kernel and in the idle loop. On SMP each
+- * CPU has a word of pending bits (CPU 0's is wasm_host_irqs, which also
+- * gets the host's device bits), IPIs among them, and a CPU also polls it
+- * when interrupts are enabled and in cpu_relax().
++ * user mode traps back into the kernel, in the idle loop and in
++ * cond_resched(). On SMP each CPU has a word of pending bits (CPU 0's is
++ * wasm_host_irqs, which also gets the host's device bits), IPIs among them,
++ * and a CPU also polls it when interrupts are enabled and in cpu_relax()
++ * (but not its timer: wait.c, kw_spin_timer()).
+  */
+ 
+ #include <linux/irq.h>
+@@ -164,6 +165,56 @@ void wasm_poll_irqs(struct pt_regs *regs)
+ 	irq_exit_rcu();
+ }
+ 
++/* Calls of cond_resched() per poll: reading the clock is a host call. */
++#define KW_RESCHED_POLL		128
++
++static DEFINE_PER_CPU(unsigned int, kw_resched_calls);
++
++static bool kw_irq_due(void)
++{
++#ifdef CONFIG_SMP
++	if (kw_irq_pending())
++		return true;
++#else
++	if (READ_ONCE(wasm_host_irqs))
++		return true;
++#endif
++	return wasm_timer_timeout() == 0;
++}
++
++/* Out of line, so that a call that does not poll does not clear a pt_regs. */
++static noinline void kw_resched_take_irqs(void)
++{
++	struct pt_regs regs = { .kernel = 1, .irqflags = ARCH_IRQ_ENABLED,
++				.cause = PT_CAUSE_NONE };
++	irqentry_state_t state;
++
++	/* The handlers expect interrupts off. */
++	raw_local_irq_disable();
++	state = irqentry_enter(&regs);
++	wasm_poll_irqs(&regs);
++	irqentry_exit(&regs, state);
++	raw_local_irq_enable();
++}
++
++/*
++ * __cond_resched(), before it looks at need_resched: take what is pending,
++ * as an interrupt arriving here. A loop that stays in the kernel would
++ * otherwise never see the tick that sets need_resched, so that its
++ * cond_resched() never let another task run. Direct reclaim is such a loop:
++ * once the OOM killer has a victim, the allocator retries until the victim
++ * has exited, and the victim needs the CPU for that (on SMP too, if it must
++ * run on this one; and the OOM reaper a timer).
++ */
++void kw_cond_resched_poll(void)
++{
++	if (likely(raw_cpu_inc_return(kw_resched_calls) % KW_RESCHED_POLL) ||
++	    irqs_disabled() || in_interrupt())
++		return;
++	if (kw_irq_due())
++		kw_resched_take_irqs();
++}
++
+ /* Called with interrupts disabled; the generic idle loop re-enables them. */
+ void arch_cpu_idle(void)
+ {
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 66abbdb6a15..3bc86ce295b 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -8023,8 +8023,17 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
+ #endif /* CONFIG_RT_MUTEXES */
+ 
+ #if !defined(CONFIG_PREEMPTION) || defined(CONFIG_PREEMPT_DYNAMIC)
++/*
++ * For architectures without asynchronous interrupts, which set need_resched:
++ * take the pending ones.
++ */
++#ifndef arch_cond_resched_poll
++static inline void arch_cond_resched_poll(void) { }
++#endif
++
+ int __sched __cond_resched(void)
+ {
++	arch_cond_resched_poll();
+ 	if (should_resched(0) && !irqs_disabled()) {
+ 		preempt_schedule_common();
+ 		return 1;
+-- 
+2.56.1
+

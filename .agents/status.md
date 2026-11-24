@@ -421,7 +421,8 @@ Open:
 - **One long syscall delays the host.** Every syscall and page fault
   costs 1000 instructions of the 200k slice, so kernel-bound
   loops end slices, but a single syscall that stays in the kernel for long
-  holds off host events, the timer and the 20 ms yield until it returns.
+  holds off the 20 ms yield until it returns, and host events and the timer
+  until it returns or calls `cond_resched()`.
 - **Safari on plain http has no JIT** (web.md). The page does not warn.
 - **JavaScriptCore and freed JIT modules**: not confirmed on a phone, and
   about 50 MiB of growth per long WebKit session is unexplained (kwemu.md,
