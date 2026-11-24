@@ -1,0 +1,367 @@
+From 96fe7c60ef27a8aa8bbaaa5b4098d892b4bbd09d Mon Sep 17 00:00:00 2001
+From: Pooya Parsa <pooya@pi0.io>
+Date: Tue, 24 Nov 2026 18:26:01 +0000
+Subject: [PATCH] vrend: keep textures that WebGL refuses off used texture
+ units
+
+WebGL refuses a draw (GL_INVALID_OPERATION) when a texture on the unit of
+a sampler the program uses is attached to the draw framebuffer ("Feedback
+loop formed between Framebuffer and active Texture"), or is of another
+base type (float, signed or unsigned integer) than the sampler ("Mismatch
+between texture format and sampler type"), even when the shader never
+samples it in that draw. GLES leaves only what such a sampler returns
+undefined. Firefox's WebRender does both: it leaves an input texture on a
+unit and renders into it, and leaves an RGBA32I texture on the units of
+float samplers; Mesa itself binds its RGBA8 fallback texture to an integer
+sampler that has no complete texture. WebGL dropped each such draw.
+
+On such a host (emscripten: vrend_state.strict_texture_units), bind no
+texture to such a unit instead: WebGL samples an empty unit as an
+incomplete texture of the sampler's type and does not refuse the draw.
+The shader info now records which samplers return integers. A
+stencil-only view counts as unsigned integer only where the host can
+sample stencil; without stencil texturing (GLES 3.0, WebGL 2) it still
+returns depth. A unit forms a loop when a level its view may sample (the
+view's levels and, without texture views, the texture's base and max
+level) is attached to the draw framebuffer.
+
+A unit is looked at again, and its texture comes back, whenever its
+answer can change: as before when its view or the program changes, and
+now also when a surface of its view's texture is attached or detached,
+when another view of that texture changes the texture's base or max
+level, and when the GL blitter sets them behind the cache (which is then
+marked unknown, so the loop check takes every level). A used sampler
+with no view gets an empty unit too, instead of whatever another program
+or sub context left on its unit or on the unit its uniform last named,
+and taking a view away marks its unit for that.
+---
+ src/vrend/vrend_renderer.c | 172 +++++++++++++++++++++++++++++++++++--
+ src/vrend/vrend_shader.c   |  14 +++
+ src/vrend/vrend_shader.h   |   4 +
+ 3 files changed, 184 insertions(+), 6 deletions(-)
+
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index addcca9..4c0cfe4 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -424,6 +424,11 @@ struct global_renderer_state {
+     * are multisample renderbuffers, which can be rendered to, cleared and
+     * blitted (resolved) from, but not sampled */
+    bool ms_renderbuffers : 1;
++   /* the host refuses a draw with a texture unit that GLES leaves
++    * undefined (WebGL 2): a used unit holds no texture rather than one
++    * attached to the draw framebuffer or of another base type than its
++    * sampler */
++   bool strict_texture_units : 1;
+ 
+    /* host GL errors that were not fatal (no CHECK_GL_ERRORS) */
+    uint32_t host_gl_errors;
+@@ -484,6 +489,9 @@ struct vrend_linked_shader_program {
+    uint32_t samplers_used_mask[PIPE_SHADER_TYPES];
+    // a subset of samplers_used_mask
+    uint32_t shadow_samp_mask[PIPE_SHADER_TYPES];
++   // subsets of samplers_used_mask: integer samplers (isampler*, usampler*)
++   uint32_t samplers_sint_mask[PIPE_SHADER_TYPES];
++   uint32_t samplers_uint_mask[PIPE_SHADER_TYPES];
+ 
+    // compact arrays of uniform locations for each set bit in samplers_used_mask
+    GLuint *sampler_locs[PIPE_SHADER_TYPES];
+@@ -1718,6 +1726,8 @@ static int bind_sampler_locs(struct vrend_linked_shader_program *sprog,
+    }
+    sprog->samplers_used_mask[shader_type] = sinfo->samplers_used_mask;
+    sprog->shadow_samp_mask[shader_type] = sinfo->shadow_samp_mask;
++   sprog->samplers_sint_mask[shader_type] = sinfo->samplers_sint_mask;
++   sprog->samplers_uint_mask[shader_type] = sinfo->samplers_uint_mask;
+ 
+    return next_sampler_id;
+ }
+@@ -3220,6 +3230,38 @@ static void vrend_hw_emit_framebuffer_state(struct vrend_sub_context *sub_ctx)
+    glDrawBuffers(sub_ctx->nr_cbufs, buffers);
+ }
+ 
++/* With strict texture units, whether a unit may hold its view's texture
++ * depends on the draw framebuffer and on the texture's base and max level:
++ * when either changes for a texture, look again at the next draw at the
++ * units of every graphics stage whose view is of that texture. */
++static void vrend_dirty_views_of_texture(struct vrend_sub_context *sub_ctx,
++                                         const struct vrend_resource *res)
++{
++   if (!vrend_state.strict_texture_units || !res)
++      return;
++   for (int stage = PIPE_SHADER_VERTEX; stage < PIPE_SHADER_COMPUTE; stage++) {
++      struct vrend_shader_view *shader_view = &sub_ctx->views[stage];
++      int n = MIN2(shader_view->max_num_views, 32);
++
++      for (int i = 0; i < n; i++) {
++         if (shader_view->views[i] && shader_view->views[i]->texture == res)
++            shader_view->dirty_mask |= 1u << i;
++      }
++   }
++}
++
++/* An attachment changes from old to new (either may be NULL): only the
++ * units of their textures can change their answer. */
++static void vrend_framebuffer_changed(struct vrend_sub_context *sub_ctx,
++                                      const struct vrend_surface *old_surf,
++                                      const struct vrend_surface *new_surf)
++{
++   if (old_surf)
++      vrend_dirty_views_of_texture(sub_ctx, old_surf->texture);
++   if (new_surf)
++      vrend_dirty_views_of_texture(sub_ctx, new_surf->texture);
++}
++
+ void vrend_set_framebuffer_state(struct vrend_context *ctx,
+                                  uint32_t nr_cbufs, uint32_t surf_handle[PIPE_MAX_COLOR_BUFS],
+                                  uint32_t zsurf_handle)
+@@ -3244,6 +3286,7 @@ void vrend_set_framebuffer_state(struct vrend_context *ctx,
+       zsurf = NULL;
+ 
+    if (sub_ctx->zsurf != zsurf) {
++      vrend_framebuffer_changed(sub_ctx, sub_ctx->zsurf, zsurf);
+       vrend_surface_reference(&sub_ctx->zsurf, zsurf);
+       vrend_hw_set_zsurf_texture(ctx);
+    }
+@@ -3262,6 +3305,7 @@ void vrend_set_framebuffer_state(struct vrend_context *ctx,
+          surf = NULL;
+ 
+       if (sub_ctx->surf[i] != surf) {
++         vrend_framebuffer_changed(sub_ctx, sub_ctx->surf[i], surf);
+          vrend_surface_reference(&sub_ctx->surf[i], surf);
+          vrend_hw_set_color_surface(sub_ctx, i);
+       }
+@@ -3269,6 +3313,7 @@ void vrend_set_framebuffer_state(struct vrend_context *ctx,
+ 
+    if (old_num > sub_ctx->nr_cbufs) {
+       for (uint32_t i = sub_ctx->nr_cbufs; i < old_num; i++) {
++         vrend_framebuffer_changed(sub_ctx, sub_ctx->surf[i], NULL);
+          vrend_surface_reference(&sub_ctx->surf[i], NULL);
+          vrend_hw_set_color_surface(sub_ctx, i);
+       }
+@@ -3745,6 +3790,11 @@ void vrend_set_single_sampler_view(struct vrend_context *ctx,
+    struct vrend_sampler_view *view = NULL;
+    struct vrend_texture *tex;
+ 
++   /* a view taken away: with strict texture units its unit is emptied at
++    * the next draw, rather than keep a texture that nothing looks at again */
++   if (vrend_state.strict_texture_units && !handle && index < 32 && shader_view->views[index])
++      shader_view->dirty_mask |= 1u << index;
++
+    if (handle) {
+       view = vrend_object_lookup(ctx->sub->object_hash, handle, VIRGL_OBJECT_SAMPLER_VIEW);
+       if (!view) {
+@@ -3789,6 +3839,12 @@ void vrend_set_single_sampler_view(struct vrend_context *ctx,
+ 
+             view->levels = view->u.tex.last_level - view->u.tex.first_level + 1;
+ 
++            if (tex->cur_base != view->u.tex.first_level ||
++                tex->cur_max != view->u.tex.last_level) {
++               /* the units of other views of this texture sample the new
++                * range too: their loop check is redone */
++               vrend_dirty_views_of_texture(ctx->sub, view->texture);
++            }
+             if (tex->cur_base != view->u.tex.first_level) {
+                glTexParameteri(view->texture->target, GL_TEXTURE_BASE_LEVEL, view->u.tex.first_level);
+                tex->cur_base = view->u.tex.first_level;
+@@ -3860,8 +3916,12 @@ void vrend_set_num_sampler_views(struct vrend_context *ctx,
+    int i;
+ 
+    struct vrend_shader_view *shader_view = &ctx->sub->views[shader_type];
+-   for (i = last_slot; i < shader_view->max_num_views; i++)
++   for (i = last_slot; i < shader_view->max_num_views; i++) {
++      /* as in vrend_set_single_sampler_view: empty the unit at the next draw */
++      if (vrend_state.strict_texture_units && i < 32 && shader_view->views[i])
++         shader_view->dirty_mask |= 1u << i;
+       vrend_sampler_view_reference(&shader_view->views[i], NULL);
++   }
+ 
+    shader_view->max_num_views = last_slot;
+ }
+@@ -5326,6 +5386,67 @@ static void vrend_draw_bind_vertex_binding(struct vrend_context *ctx,
+    }
+ }
+ 
++/* Whether a level of the view's texture that the unit may sample is
++ * attached to the draw framebuffer (a feedback loop, which WebGL refuses
++ * even when the shader never samples the unit). */
++static bool vrend_view_in_framebuffer(const struct vrend_sub_context *sub_ctx,
++                                      const struct vrend_sampler_view *view)
++{
++   const struct vrend_resource *res = view->texture;
++   GLuint first = view->u.tex.first_level, last = view->u.tex.last_level;
++
++   /* without a texture view the texture's base and max level apply, which
++    * the last view set of this texture chose: take both ranges */
++   if (view->gl_id == res->gl_id) {
++      const struct vrend_texture *tex = (const struct vrend_texture *)res;
++
++      first = tex->cur_base == (GLuint)-1 ? 0 : MIN2(first, tex->cur_base);
++      last = MAX2(last, tex->cur_max);
++   }
++
++   for (uint32_t i = 0; i < sub_ctx->nr_cbufs; i++) {
++      const struct vrend_surface *surf = sub_ctx->surf[i];
++
++      if (surf && surf->texture == res && surf->level >= first && surf->level <= last)
++         return true;
++   }
++   return sub_ctx->zsurf && sub_ctx->zsurf->texture == res &&
++          sub_ctx->zsurf->level >= first && sub_ctx->zsurf->level <= last;
++}
++
++/* Whether a strict host (WebGL) would refuse a draw with the view's texture
++ * on the unit of sampler i: the texture is of another base type (float,
++ * signed or unsigned integer) than the sampler, or it is attached to the
++ * draw framebuffer. GLES leaves what such a sampler returns undefined. */
++static bool vrend_texture_unit_refused(const struct vrend_sub_context *sub_ctx,
++                                       int shader_type, int i,
++                                       const struct vrend_sampler_view *view)
++{
++   const struct vrend_linked_shader_program *sprog = sub_ctx->prog;
++   bool samp_sint = sprog->samplers_sint_mask[shader_type] & (1u << i);
++   bool samp_uint = sprog->samplers_uint_mask[shader_type] & (1u << i);
++   /* what the unit samples: the texture's own storage when the view has no
++    * texture of its own; a depth/stencil texture returns floats (depth),
++    * or unsigned integers for a stencil-only view where the host can
++    * sample stencil (not GLES 3.0, WebGL 2: there it still returns depth) */
++   enum virgl_formats format = view->gl_id == view->texture->gl_id ?
++                               (enum virgl_formats)view->texture->base.format : view->format;
++   bool view_sint, view_uint;
++
++   if (util_format_is_depth_or_stencil(view->format)) {
++      view_sint = false;
++      view_uint = has_feature(feat_stencil_texturing) &&
++                  !util_format_has_depth(util_format_description(view->format));
++   } else {
++      view_sint = util_format_is_pure_sint(format);
++      view_uint = util_format_is_pure_uint(format);
++   }
++   if (view_sint != samp_sint || view_uint != samp_uint)
++      return true;
++
++   return shader_type != PIPE_SHADER_COMPUTE && vrend_view_in_framebuffer(sub_ctx, view);
++}
++
+ static GLuint vrend_draw_bind_samplers_shader(struct vrend_sub_context *sub_ctx,
+                                               int shader_type,
+                                               GLuint next_sampler_id)
+@@ -5341,7 +5462,19 @@ static GLuint vrend_draw_bind_samplers_shader(struct vrend_sub_context *sub_ctx,
+       int i = u_bit_scan(&mask);
+       struct vrend_sampler_view *tview = shader_view->views[i];
+ 
+-      if ((dirty & (1 << i)) && tview) {
++      if ((dirty & (1 << i)) && !tview && vrend_state.strict_texture_units) {
++         /* a used sampler with no view samples an empty unit, not what
++          * another program or sub context left on it (on the one GL
++          * context), nor unit 0 by the uniform's default */
++         static const GLenum targets[] = {
++            GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP, GL_TEXTURE_2D_ARRAY
++         };
++
++         glActiveTexture(GL_TEXTURE0 + next_sampler_id);
++         glUniform1i(sprog->sampler_locs[shader_type][sampler_index], next_sampler_id);
++         for (unsigned t = 0; t < ARRAY_SIZE(targets); t++)
++            glBindTexture(targets[t], 0);
++      } else if ((dirty & (1 << i)) && tview) {
+          glActiveTexture(GL_TEXTURE0 + next_sampler_id);
+          glUniform1i(sprog->sampler_locs[shader_type][sampler_index], next_sampler_id);
+ 
+@@ -5393,10 +5526,19 @@ static GLuint vrend_draw_bind_samplers_shader(struct vrend_sub_context *sub_ctx,
+                target = GL_TEXTURE_BUFFER;
+             }
+ 
+-            glBindTexture(target, id);
+-            vrend_apply_sampler_state(sub_ctx, tview->texture,
+-                                      shader_view->samplers[i],
+-                                      next_sampler_id, tview);
++            if (vrend_state.strict_texture_units && target != GL_TEXTURE_BUFFER &&
++                vrend_texture_unit_refused(sub_ctx, shader_type, i, tview)) {
++               /* no texture: an empty unit is never refused (WebGL samples
++                * an incomplete texture of the sampler's type), and the
++                * unit is looked at again when the view or the framebuffer
++                * changes */
++               glBindTexture(target, 0);
++            } else {
++               glBindTexture(target, id);
++               vrend_apply_sampler_state(sub_ctx, tview->texture,
++                                         shader_view->samplers[i],
++                                         next_sampler_id, tview);
++            }
+ 
+             if (vrend_state.use_gles) {
+                const unsigned levels = tview->levels ? tview->levels : tview->texture->base.last_level + 1u;
+@@ -7889,6 +8031,13 @@ int vrend_renderer_init(const struct vrend_if_cbs *cbs, uint32_t flags)
+                  max_samples);
+    }
+ 
++   /* WebGL refuses a draw with a texture both on a used unit and attached
++    * to the draw framebuffer, or of another base type than its sampler,
++    * even when the shader never samples it */
++#ifdef __EMSCRIPTEN__
++   vrend_state.strict_texture_units = true;
++#endif
++
+    /* disable for format testing */
+    if (has_feature(feat_debug_cb)) {
+       glEnable(GL_DEBUG_OUTPUT);
+@@ -11493,6 +11642,17 @@ static void vrend_renderer_blit_int(struct vrend_context *ctx,
+       VREND_DEBUG(dbg_blit, ctx, "BLIT_INT: use GL fallback\n");
+       if (resolved || !has_bit(src_res->storage_bits, VREND_STORAGE_GL_RENDERBUFFER)) {
+          vrend_renderer_blit_gl(ctx, resolved ? resolved : src_res, dst_res, &blit_info);
++         if (vrend_state.strict_texture_units && !resolved &&
++             has_bit(src_res->storage_bits, VREND_STORAGE_GL_TEXTURE)) {
++            /* it set the source's base and max level to the blitted level
++             * without telling the cache: unknown, so the loop check takes
++             * every level and the next view sets them again */
++            struct vrend_texture *tex = (struct vrend_texture *)src_res;
++
++            tex->cur_base = -1;
++            tex->cur_max = 10000;
++            vrend_dirty_views_of_texture(ctx->sub, src_res);
++         }
+          if (vrend_state.single_gl_context)
+             vrend_single_acquire(ctx->sub);
+          else
+diff --git a/src/vrend/vrend_shader.c b/src/vrend/vrend_shader.c
+index 2b4a07d..425dba7 100644
+--- a/src/vrend/vrend_shader.c
++++ b/src/vrend/vrend_shader.c
+@@ -7931,6 +7931,20 @@ static void fill_sinfo(const struct dump_ctx *ctx, struct vrend_shader_info *sin
+    sinfo->num_inputs = ctx->num_inputs;
+    sinfo->num_outputs = ctx->num_outputs;
+    sinfo->shadow_samp_mask = ctx->shadow_samp_mask;
++   sinfo->samplers_sint_mask = 0;
++   sinfo->samplers_uint_mask = 0;
++   for (uint32_t mask = ctx->samplers_used; mask; ) {
++      int i = u_bit_scan(&mask);
++      /* the type the declaration has: an array's is its first sampler's */
++      int first = (ctx->info.indirect_files & (1 << TGSI_FILE_SAMPLER)) ?
++                  lookup_sampler_array(ctx, i) : -1;
++      enum tgsi_return_type type = ctx->samplers[first >= 0 ? first : i].tgsi_sampler_return;
++
++      if (type == TGSI_RETURN_TYPE_SINT)
++         sinfo->samplers_sint_mask |= 1u << i;
++      else if (type == TGSI_RETURN_TYPE_UINT)
++         sinfo->samplers_uint_mask |= 1u << i;
++   }
+    sinfo->gs_out_prim = ctx->gs_out_prim;
+    sinfo->tes_prim = ctx->tes_prim_mode;
+    sinfo->tes_point_mode = ctx->tes_point_mode;
+diff --git a/src/vrend/vrend_shader.h b/src/vrend/vrend_shader.h
+index 7f5897b..fb2a8b0 100644
+--- a/src/vrend/vrend_shader.h
++++ b/src/vrend/vrend_shader.h
+@@ -142,6 +142,10 @@ struct vrend_shader_info {
+    uint32_t ssbo_binding_offset;
+    int32_t ssbo_last_binding;
+    uint32_t shadow_samp_mask;
++   /* subsets of samplers_used_mask: the samplers declared to return signed
++    * and unsigned integers (isampler*, usampler*) */
++   uint32_t samplers_sint_mask;
++   uint32_t samplers_uint_mask;
+    uint32_t attrib_input_mask;
+    uint32_t fs_blend_equation_advanced;
+    uint32_t fog_input_mask;
+-- 
+2.56.1
+

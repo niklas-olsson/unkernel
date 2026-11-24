@@ -9,7 +9,7 @@
 // has the scanout, frame() otherwise), runs the steps in the guest with no
 // GL environment variables and posts what they printed; the harness judges.
 // Query: size=WxH (the display), resize=WxH (step r's size, default 960x540; not 800x600: DRM_GLMARK),
-// scenes= (glmark2 -b list), skip=a,b,c,d,e,g,h,r,
+// scenes= (glmark2 -b list), skip=a,b,c,d,e,g,h,m,t,r,
 // cmd= (a command run first, as root; for debugging), eager (gl: { eager:
 // true }: the renderer loads before the boot; by default it loads on the
 // guest's first GL use), glmodule=URL (another virgl.mjs: the harness's
@@ -153,7 +153,7 @@ async function main() {
 	};
 
 	// the test programs, in /tmp
-	for (const name of ["kwgl-state", "prime", "kms-dumb", "kms-hotplug", "window-image", "int-attrib", "msaa"]) {
+	for (const name of ["kwgl-state", "prime", "kms-dumb", "kms-hotplug", "window-image", "int-attrib", "msaa", "feedback"]) {
 		const r = await fetch(`/files/${name}`);
 		if (!r.ok) continue;
 		const bin = new Uint8Array(await r.arrayBuffer());
@@ -282,6 +282,13 @@ async function main() {
 	// for OpenGL ES 3.0): 4 samples per format, an antialiased draw resolved
 	if (!skip.has("m"))
 		await run("msaa", "dmesg -C; /tmp/msaa /dev/dri/renderD128; e=$?; echo \"kernel errors $(dmesg | grep -c 'response 0x')\"; exit $e");
+
+	// (t) textures left on used sampler units that the draws never sample
+	// (Firefox's WebRender): one attached to the draw framebuffer, integer
+	// and float ones on samplers of the other type; right pixels, and no
+	// virtio-gpu command failed in the guest's kernel
+	if (!skip.has("t"))
+		await run("feedback", "dmesg -C; /tmp/feedback /dev/dri/renderD128; e=$?; echo \"kernel errors $(dmesg | grep -c 'response 0x')\"; exit $e");
 
 	// (r) a display size change on the running machine (vm.updateDisplaySize()):
 	// a KMS client reading uevents hears the hotplug and probes the new

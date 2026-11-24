@@ -1,4 +1,4 @@
-From 825e64287080c9e998ffcaaeeec8b88d3c9e3e1f Mon Sep 17 00:00:00 2001
+From 7264f3726ed12362517989d02e4722b5faf00038 Mon Sep 17 00:00:00 2001
 From: unkernel <unkernel@localhost>
 Date: Mon, 23 Nov 2026 22:31:01 +0100
 Subject: [PATCH] vrend: lower system value uniforms on WebGL hosts short on
@@ -23,18 +23,18 @@ Mesa use the 12 actual UBOs in each stage.
  3 files changed, 119 insertions(+), 11 deletions(-)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index addcca9..71725fd 100644
+index 4c0cfe4..bf52378 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -424,6 +424,7 @@ struct global_renderer_state {
-     * are multisample renderbuffers, which can be rendered to, cleared and
-     * blitted (resolved) from, but not sampled */
-    bool ms_renderbuffers : 1;
+@@ -429,6 +429,7 @@ struct global_renderer_state {
+     * attached to the draw framebuffer or of another base type than its
+     * sampler */
+    bool strict_texture_units : 1;
 +   bool plain_sysval_uniforms : 1;
  
     /* host GL errors that were not fatal (no CHECK_GL_ERRORS) */
     uint32_t host_gl_errors;
-@@ -438,6 +439,12 @@ struct sysval_uniform_block {
+@@ -443,6 +444,12 @@ struct sysval_uniform_block {
     GLint drawid_base;
  };
  
@@ -47,7 +47,7 @@ index addcca9..71725fd 100644
  static struct global_renderer_state vrend_state;
  
  static inline bool has_feature(enum features_id feature_id)
-@@ -499,6 +506,11 @@ struct vrend_linked_shader_program {
+@@ -507,6 +514,11 @@ struct vrend_linked_shader_program {
     GLuint virgl_block_bind;
     uint32_t sysvalue_data_cookie;
     GLuint ubo_sysval_buffer_id;
@@ -59,7 +59,7 @@ index addcca9..71725fd 100644
  
     uint32_t images_used_mask[PIPE_SHADER_TYPES];
     GLint *img_locs[PIPE_SHADER_TYPES];
-@@ -1824,6 +1836,16 @@ static void bind_virgl_block_loc(struct vrend_linked_shader_program *sprog,
+@@ -1834,6 +1846,16 @@ static void bind_virgl_block_loc(struct vrend_linked_shader_program *sprog,
     }
  }
  
@@ -76,7 +76,7 @@ index addcca9..71725fd 100644
  static void rebind_ubo_and_sampler_locs(struct vrend_linked_shader_program *sprog,
                                          enum pipe_shader_type last_shader)
  {
-@@ -1845,6 +1867,23 @@ static void rebind_ubo_and_sampler_locs(struct vrend_linked_shader_program *spro
+@@ -1855,6 +1877,23 @@ static void rebind_ubo_and_sampler_locs(struct vrend_linked_shader_program *spro
  
     /* Now `next_ubo_id` is the last ubo id, which is used for the VirglBlock. */
     sprog->virgl_block_bind = GL_INVALID_INDEX;
@@ -100,7 +100,7 @@ index addcca9..71725fd 100644
     for (enum pipe_shader_type shader_type = PIPE_SHADER_VERTEX;
          shader_type <= last_shader;
          shader_type++) {
-@@ -5652,9 +5691,37 @@ static void vrend_draw_bind_images_shader(struct vrend_sub_context *sub_ctx, int
+@@ -5794,9 +5833,37 @@ static void vrend_draw_bind_images_shader(struct vrend_sub_context *sub_ctx, int
  }
  
  static void
@@ -140,7 +140,7 @@ index addcca9..71725fd 100644
        return;
  
     if (sub_ctx->sysvalue_data_cookie != sub_ctx->prog->sysvalue_data_cookie) {
-@@ -6091,7 +6158,7 @@ int vrend_draw_vbo(struct vrend_context *ctx,
+@@ -6233,7 +6300,7 @@ int vrend_draw_vbo(struct vrend_context *ctx,
     }
  
     vrend_draw_bind_objects(sub_ctx, program_select_result == PROGRAMM_NEW);
@@ -149,7 +149,7 @@ index addcca9..71725fd 100644
  
     if (has_feature(feat_gles31_vertex_attrib_binding)) {
        if (sub_ctx->ve) {
-@@ -7824,6 +7891,28 @@ int vrend_renderer_init(const struct vrend_if_cbs *cbs, uint32_t flags)
+@@ -7966,6 +8033,28 @@ int vrend_renderer_init(const struct vrend_if_cbs *cbs, uint32_t flags)
     init_features(gles ? 0 : gl_ver,
                   gles ? gl_ver : 0);
  
@@ -178,7 +178,7 @@ index addcca9..71725fd 100644
     if (!vrend_winsys_has_gl_colorspace())
        clear_feature(feat_srgb_write_control) ;
  
-@@ -8218,6 +8307,7 @@ struct vrend_context *vrend_create_context(int id, uint32_t nlen, const char *de
+@@ -8367,6 +8456,7 @@ struct vrend_context *vrend_create_context(int id, uint32_t nlen, const char *de
  
     grctx->shader_cfg.max_shader_patch_varyings = vrend_state.max_shader_patch_varyings;
     grctx->shader_cfg.use_gles = vrend_state.use_gles;
@@ -186,7 +186,7 @@ index addcca9..71725fd 100644
     grctx->shader_cfg.use_core_profile = vrend_state.use_core_profile;
     grctx->shader_cfg.use_explicit_locations = vrend_state.use_explicit_locations;
     grctx->shader_cfg.max_draw_buffers = vrend_state.max_draw_buffers;
-@@ -12859,9 +12949,9 @@ static void vrend_renderer_fill_caps_v1(int gl_ver, int gles_ver, union virgl_ca
+@@ -13019,9 +13109,9 @@ static void vrend_renderer_fill_caps_v1(int gl_ver, int gles_ver, union virgl_ca
  
     if (has_feature(feat_ubo)) {
        glGetIntegerv(GL_MAX_VERTEX_UNIFORM_BLOCKS, &max);
@@ -199,7 +199,7 @@ index addcca9..71725fd 100644
     }
  
     if (has_feature(feat_depth_clamp))
-@@ -13458,11 +13548,12 @@ static void vrend_renderer_fill_caps_v2(int gl_ver, int gles_ver,  union virgl_c
+@@ -13618,11 +13708,12 @@ static void vrend_renderer_fill_caps_v2(int gl_ver, int gles_ver,  union virgl_c
     }
  
     /* Propagate the max of Uniform Components */
@@ -215,10 +215,10 @@ index addcca9..71725fd 100644
     if (has_feature(feat_geometry_shader)) {
        glGetIntegerv(GL_MAX_GEOMETRY_UNIFORM_COMPONENTS, &max);
 diff --git a/src/vrend/vrend_shader.c b/src/vrend/vrend_shader.c
-index 2b4a07d..a93a758 100644
+index 425dba7..5aaa048 100644
 --- a/src/vrend/vrend_shader.c
 +++ b/src/vrend/vrend_shader.c
-@@ -8024,11 +8024,25 @@ static void set_strbuffers(const struct vrend_glsl_strbufs* glsl_strbufs,
+@@ -8038,11 +8038,25 @@ static void set_strbuffers(const struct vrend_glsl_strbufs* glsl_strbufs,
     strarray_addstrbuf(shader, &glsl_strbufs->glsl_main);
  }
  
@@ -245,7 +245,7 @@ index 2b4a07d..a93a758 100644
     strbuf_append(block, "layout (std140) uniform VirglBlock {\n");
     strbuf_append(block, "\tvec4 clipp[8];\n");
     strbuf_appendf(block, "\tuint stipple_pattern[%d];\n", VREND_POLYGON_STIPPLE_SIZE);
-@@ -8304,7 +8318,8 @@ bool vrend_convert_shader(const struct vrend_context *rctx,
+@@ -8318,7 +8332,8 @@ bool vrend_convert_shader(const struct vrend_context *rctx,
     fill_var_sinfo(&ctx, var_sinfo);
  
     emit_required_sysval_uniforms (&ctx.glsl_strbufs.glsl_hdr,
@@ -255,7 +255,7 @@ index 2b4a07d..a93a758 100644
     set_strbuffers(&ctx.glsl_strbufs, shader);
  
     VREND_DEBUG(dbg_shader_glsl, rctx, "GLSL:");
-@@ -8507,7 +8522,8 @@ bool vrend_shader_create_passthrough_tcs(const struct vrend_context *rctx,
+@@ -8521,7 +8536,8 @@ bool vrend_shader_create_passthrough_tcs(const struct vrend_context *rctx,
  
     fill_sinfo(&ctx, sinfo);
     emit_required_sysval_uniforms (&ctx.glsl_strbufs.glsl_hdr,
@@ -266,10 +266,10 @@ index 2b4a07d..a93a758 100644
  
     VREND_DEBUG(dbg_shader_glsl, rctx, "GLSL:");
 diff --git a/src/vrend/vrend_shader.h b/src/vrend/vrend_shader.h
-index 7f5897b..2d1f0df 100644
+index fb2a8b0..abb9aec 100644
 --- a/src/vrend/vrend_shader.h
 +++ b/src/vrend/vrend_shader.h
-@@ -259,6 +259,7 @@ struct vrend_shader_cfg {
+@@ -263,6 +263,7 @@ struct vrend_shader_cfg {
     uint32_t has_texture_shadow_lod : 1;
     uint32_t has_vs_layer : 1;
     uint32_t has_vs_viewport_index : 1;

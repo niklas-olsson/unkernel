@@ -70,6 +70,14 @@
 //      before it offers ES 3.0), and a 4-sample draw with a depth test
 //      resolved by glBlitFramebuffer: right colours, partly covered pixels
 //      on the triangle's edge, no failed virtio-gpu command
+//   t  test/gpu/feedback.c (built as kwgl-state is): draws with textures
+//      that the shaders never sample left on used units (as Firefox's
+//      WebRender leaves them): one attached to the draw framebuffer (a
+//      feedback loop), an integer one on a float sampler and a float one
+//      on an integer sampler, then draws that sample the units again (the
+//      real textures back once legal), each read back: the colours must
+//      be right and no virtio-gpu command may fail (WebGL refuses such a
+//      draw)
 //   r  a display size change on the running machine (vm.updateDisplaySize()
 //      to --resize WxH, default 960x540): test/gpu/kms-hotplug.c (built
 //      here) reads the drm uevent with HOTPLUG=1 from netlink and probes
@@ -148,6 +156,7 @@ const windowBin = join(out, "window-image");
 const kmsDumbBin = join(out, "kms-dumb");
 const intAttribBin = join(out, "int-attrib");
 const msaaBin = join(out, "msaa");
+const feedbackBin = join(out, "feedback");
 
 const step = (what, cmd, cmdArgs) => {
 	console.log(`== ${what}`);
@@ -176,6 +185,7 @@ if (drm) step("test/gpu/prime.c for the guest", process.env.ZIG ?? "zig", ["cc",
 if (drm) step("test/gpu/window-image.c for the guest", join(here, "build-guest-state.sh"), [windowBin, join(root, "test/gpu/window-image.c")]);
 if (drm) step("test/gpu/int-attrib.c for the guest", join(here, "build-guest-state.sh"), [intAttribBin, join(root, "test/gpu/int-attrib.c")]);
 if (drm) step("test/gpu/msaa.c for the guest", join(here, "build-guest-state.sh"), [msaaBin, join(root, "test/gpu/msaa.c")]);
+if (drm) step("test/gpu/feedback.c for the guest", join(here, "build-guest-state.sh"), [feedbackBin, join(root, "test/gpu/feedback.c")]);
 if (drm) step("test/gpu/kms-hotplug.c for the guest", process.env.ZIG ?? "zig", ["cc", "-target", "aarch64-linux-musl", "-mcpu=generic", "-static", "-O2", "-s", "-o", join(out, "kms-hotplug"), join(root, "test/gpu/kms-hotplug.c")]);
 if (drm && (has("--fail") || has("--lose"))) step("test/gpu/kms-dumb.c for the guest", process.env.ZIG ?? "zig", ["cc", "-target", "aarch64-linux-musl", "-mcpu=generic", "-static", "-O2", "-s", "-o", kmsDumbBin, join(root, "test/gpu/kms-dumb.c")]);
 
@@ -236,6 +246,7 @@ const server = createServer(async (req, res) => {
 	if (p === "/files/window-image" && drm) return sendFile(req, res, windowBin, "application/octet-stream");
 	if (p === "/files/int-attrib" && drm) return sendFile(req, res, intAttribBin, "application/octet-stream");
 	if (p === "/files/msaa" && drm) return sendFile(req, res, msaaBin, "application/octet-stream");
+	if (p === "/files/feedback" && drm) return sendFile(req, res, feedbackBin, "application/octet-stream");
 	if (p === "/files/kms-dumb" && drm && existsSync(kmsDumbBin)) return sendFile(req, res, kmsDumbBin, "application/octet-stream");
 	if (p === "/files/kms-hotplug" && drm) return sendFile(req, res, join(out, "kms-hotplug"), "application/octet-stream");
 	// --gl-delay: the renderer's module, late (/slow/virgl.mjs; virgl.wasm next to it on time)
@@ -262,7 +273,7 @@ if (has("--lose")) query.set("lose", "1");
 if (opt("--gl-delay")) query.set("glmodule", "/slow/virgl.mjs");
 if (has("--fail")) {
 	query.set("fail", "1");
-	if (!opt("--skip")) query.set("skip", "a,b,c,d,e,g,h");
+	if (!opt("--skip")) query.set("skip", "a,b,c,d,e,g,h,t");
 }
 const url = `http://127.0.0.1:${server.address().port}/test/${drm ? "drm" : "unkernel"}.html?${query}`;
 console.log(`== ${url}\n   output in ${out}`);
@@ -461,6 +472,9 @@ function judgeDrm(res) {
 	const ms = res.steps.msaa;
 	if (ms) report("multisampling", ms.exitCode === 0 && /^ok samples/m.test(ms.stdout) && /^ok draw/m.test(ms.stdout) && /^kernel errors 0$/m.test(ms.stdout),
 		ms.stdout.trim().split("\n").join("; ") + (ms.stderr.trim() ? ` (stderr: ${ms.stderr.trim()})` : ""));
+	const fb = res.steps.feedback;
+	if (fb) report("texture units", fb.exitCode === 0 && ["into-b-a-bound", "into-a-a-bound", "sampled-a", "into-b-unbound", "types", "sampled-types"].every((n) => new RegExp(`^ok ${n}:`, "m").test(fb.stdout)) && /^kernel errors 0$/m.test(fb.stdout),
+		fb.stdout.trim().split("\n").join("; ") + (fb.stderr.trim() ? ` (stderr: ${fb.stderr.trim()})` : ""));
 	// A WebGL error drops one call and the guest's context goes on (gl.md, Patches, 19): none is expected.
 	// A lost context may raise one (CONTEXT_LOST_WEBGL), so not after --lose.
 	const glErrors = res.gl?.gpu?.glErrors;
