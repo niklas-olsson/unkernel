@@ -27,7 +27,7 @@ What is translated:
 | `common.zig` | locals, slot access, `Use` helpers |
 | `kindtest.zig`, `tests.zig` | test helpers and the core's tests |
 
-The other `generic` ops (scalar FMA, LD2-4/ST2-4, the rest of AdvSIMD
+The other `generic` ops (LD2-4/ST2-4, the rest of AdvSIMD
 (also all of it without SIMD), other system ops, exclusive pairs, CASP,
 SHA3, FP off its fast path) are calls of the reference interpreter through the
 kernel's function table (Generic ops, below); a host without the table
@@ -266,21 +266,33 @@ registers (W/S, X/D, X/V.D[1]), UMOV, INS (general) of a 64-bit lane, DUP
 a NaN operand or with FPCR.FZ). musl's soft long double in printf and its
 memset are the main users.
 
-**Scalar FP fast paths** (`fpFast`, `cvtz`): FADD, FSUB, FMUL, FDIV, FSQRT
-(S, D), SCVTF, UCVTF (W/X to S/D), FCVTZS, FCVTZU (S/D to W/X), FCVT (S to
-D, D to S) inline, bit-exact with fparith.zig, with the interpreter call
-on the rest; FMOV, FABS, FNEG (register), FMOV (immediate) and FCSEL need
-no slow path. The fast path needs FPCR.RMode = nearest, FZ = 0, and a
-result that is a normal number away from both ends of the range (no NaN,
-infinity, zero, denormal, overflow, underflow), so IXC is the only flag
-that can arise and wasm's result is Arm's. IXC is exact: TwoSum for
-FADD/FSUB, the exact product in double for single FMUL/FDIV/FSQRT, the
-significant bits for SCVTF/UCVTF, a cut fraction for FCVTZ*. Double FMUL,
-FDIV and FSQRT need an exact product (an FMA, which MVP wasm lacks), so
-they take the fast path only while FPSR.IXC is already set. FCVTZS/FCVTZU
-do all of toFixed inline (NaN to 0, saturation, IOC); only FZ calls. The
-slow path stores only the operands the interpreter reads and loads only
-what it writes. The FMA forms (FMADD, ...) stay calls.
+**Scalar FP fast paths** (`fpFast`, `cvtz`): FADD, FSUB, FMUL, FDIV, FSQRT,
+FMAX, FMIN, FMAXNM, FMINNM, FMADD, FMSUB, FNMADD, FNMSUB (S, D), SCVTF, UCVTF
+(W/X to S/D), FCVTZS, FCVTZU (S/D to W/X), FCVT (S to D, D to S) inline,
+bit-exact with fparith.zig, with the interpreter call on the rest; FMOV,
+FABS, FNEG (register), FMOV (immediate) and FCSEL need no slow path. The
+arithmetic fast path needs FPCR.RMode = nearest and FZ = 0. FADD, FSUB,
+FMUL, FDIV and FSQRT check only the result: a normal number away from both
+ends of the range is no NaN, infinity or tiny value, and with FZ = 0 a
+denormal operand raises nothing, so IXC is the only flag that can arise
+and wasm's result is Arm's. The hot path is one test and branch: such a
+result with FPSR.IXC already set (FPCR and FPSR in one load) is written,
+and FPSR is not. Behind it, ±0.0 results take the fast path when exact (a
+zero sum always; FMUL, FDIV and FSQRT only from a zero first operand,
+either for FMUL), and with FPSR.IXC clear IXC is computed exactly: TwoSum
+for FADD/FSUB, the exact product in double for single FMUL/FDIV/FSQRT,
+significant bits for SCVTF/UCVTF, the round trip for FCVT to single;
+double FMUL/FDIV/FSQRT call the interpreter then. Scalar
+FMAX/FMIN/FMAXNM/FMINNM run inline via wasm min/max when FPCR.FZ = 0 and
+the result is not NaN. Scalar FMADD/FMSUB/FNMADD/FNMSUB run inline while
+FPCR allows fast path and FPSR.IXC is already set, with operands in range
+or ±0.0, all in one test (a branch on IXC alone first made the IXC-set
+path about 12% slower, 2026-11-24): single promotes to f64 and rejects
+exact ties (`0x1000_0000`); double uses Dekker TwoProd + Knuth TwoSum over
+bounded exponents (`580..1460`) and rejects exact powers of two or errors
+near 0.5 ULP. FCVTZS/FCVTZU do all of toFixed inline (NaN to 0, saturation, IOC);
+only FZ calls. The slow path stores only the operands the interpreter reads
+and loads only what it writes.
 
 **Loads into XZR.** The tier leaves an integer load whose Rt (or Rt2) is
 XZR `generic` (slot 32 is XZR for the ops). Compiled code runs it as its

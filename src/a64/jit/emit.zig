@@ -563,17 +563,21 @@ fn genFast(r: std.Random, out: []u32, pc: u64) usize {
 }
 
 /// Scalar FP that generic.zig translates with a fast path and an
-/// interpreter call (FADD, FSUB, FMUL, FDIV, FSQRT, SCVTF, UCVTF, FCVTZS,
-/// FCVTZU, FCVT) or without one (FMOV, FABS, FNEG, FMOV (immediate),
+/// interpreter call (FADD, FSUB, FMUL, FDIV, FSQRT, FMAX, FMIN, FMAXNM,
+/// FMINNM, FMADD, FMSUB, FNMADD, FNMSUB, SCVTF, UCVTF, FCVTZS, FCVTZU,
+/// FCVT) or without one (FMOV, FABS, FNEG, FMOV (immediate),
 /// FCSEL), on V0..V7 so that results feed later ops, and the operands
 /// they meet: edge FP values put into a register by MOVZ/MOVK and FMOV
 /// (zeros, denormals, the smallest and largest normals, values next to
-/// powers of two, infinities, quiet and signalling NaNs, either sign),
-/// integers next to 2^24, 2^53, 2^31, 2^63 and 2^64 for the conversions,
-/// FPCR with RMode, FZ and DN at random (the fast path needs RNE and no
-/// FZ) and FPSR with or without IXC (double FMUL/FDIV/FSQRT take the fast
-/// path only with IXC set), and after half the ops the flags they set
-/// (MRS FPSR into a register, then MSR FPSR, XZR).
+/// powers of two, infinities, quiet and signalling NaNs, either sign; a
+/// value of one precision read as the other is mostly a denormal or zero,
+/// operands that the fast path takes with a normal result), integers next
+/// to 2^24, 2^53, 2^31, 2^63 and 2^64 for the conversions, FPCR with RMode,
+/// FZ and DN at random (the fast path needs RNE and no FZ) and FPSR with or
+/// without IXC (the hot path needs it set; FMADD, and double
+/// FMUL/FDIV/FSQRT with a non-zero result, take the fast path only then),
+/// and after half the ops the flags they set (MRS FPSR into a register,
+/// then MSR FPSR, XZR). FADD, FSUB, FMUL and FDIV are 3 in 18 picks.
 fn genFp(r: std.Random, out: []u32, pc: u64) usize {
     _ = pc;
     const v = struct {
@@ -586,10 +590,10 @@ fn genFp(r: std.Random, out: []u32, pc: u64) usize {
     const vm = v.reg(r);
     const ftype: u32 = r.uintLessThan(u32, 2) << 22; // single, double
     const x9: u32 = 9;
-    switch (r.uintLessThan(u32, 16)) {
+    switch (r.uintLessThan(u32, 18)) {
         0, 1, 2 => { // an edge value into Vd: top 16 bits by MOVZ, low bits by MOVK
             const dbl = r.boolean();
-            const exps = [_]u32{ 0, 1, 2, 3, 0x3fe, 0x3ff, 0x400, 0x433, 0x434, 0x7fd, 0x7fe, 0x7ff };
+            const exps = [_]u32{ 0, 1, 2, 3, 579, 580, 581, 0x3fe, 0x3ff, 0x400, 0x433, 0x434, 1459, 1460, 1461, 0x7fd, 0x7fe, 0x7ff };
             const sexps = [_]u32{ 0, 1, 2, 3, 0x7e, 0x7f, 0x80, 0x96, 0x97, 0xfd, 0xfe, 0xff };
             const sign: u32 = r.uintLessThan(u32, 2) << 15;
             if (dbl) {
@@ -656,15 +660,17 @@ fn genFp(r: std.Random, out: []u32, pc: u64) usize {
             return 2;
         },
         6, 7, 8 => out[0] = 0x1e20_0800 | ftype | (vm << 16) | (r.uintLessThan(u32, 4) << 12) | (vn << 5) | vd, // fmul, fdiv, fadd, fsub
-        9 => out[0] = 0x1e20_4000 | ftype | (r.uintLessThan(u32, 4) << 15) | (vn << 5) | vd, // fmov, fabs, fneg, fsqrt
-        10 => out[0] = if (r.boolean()) 0x1e62_4000 | (vn << 5) | vd else 0x1e22_c000 | (vn << 5) | vd, // fcvt sD, dN / dD, sN
-        11 => out[0] = 0x1e20_1000 | ftype | (r.uintLessThan(u32, 256) << 13) | vd, // fmov (immediate)
-        12 => { // fcsel after a compare
+        9 => out[0] = 0x1e20_4800 | ftype | (vm << 16) | (r.uintLessThan(u32, 4) << 12) | (vn << 5) | vd, // fmax, fmin, fmaxnm, fminnm
+        10 => out[0] = 0x1f00_0000 | ftype | (r.uintLessThan(u32, 2) << 21) | (vm << 16) | (r.uintLessThan(u32, 2) << 15) | (v.reg(r) << 10) | (vn << 5) | vd, // fmadd, fmsub, fnmadd, fnmsub
+        11 => out[0] = 0x1e20_4000 | ftype | (r.uintLessThan(u32, 4) << 15) | (vn << 5) | vd, // fmov, fabs, fneg, fsqrt
+        12 => out[0] = if (r.boolean()) 0x1e62_4000 | (vn << 5) | vd else 0x1e22_c000 | (vn << 5) | vd, // fcvt sD, dN / dD, sN
+        13 => out[0] = 0x1e20_1000 | ftype | (r.uintLessThan(u32, 256) << 13) | vd, // fmov (immediate)
+        14 => { // fcsel after a compare
             out[0] = 0xeb00_001f | (kt.anyReg(r) << 16) | ((kt.anyReg(r) & 30) << 5);
             out[1] = 0x1e20_0c00 | ftype | (vm << 16) | (r.uintLessThan(u32, 16) << 12) | (vn << 5) | vd;
             return 2;
         },
-        13 => out[0] = 0x1e22_0000 | (r.uintLessThan(u32, 2) << 31) | ftype | (r.uintLessThan(u32, 2) << 16) | ((if (r.boolean()) x9 else kt.anyReg(r)) << 5) | vd, // scvtf, ucvtf
+        15 => out[0] = 0x1e22_0000 | (r.uintLessThan(u32, 2) << 31) | ftype | (r.uintLessThan(u32, 2) << 16) | ((if (r.boolean()) x9 else kt.anyReg(r)) << 5) | vd, // scvtf, ucvtf
         else => out[0] = 0x1e38_0000 | (r.uintLessThan(u32, 2) << 31) | ftype | (r.uintLessThan(u32, 2) << 16) | (vn << 5) | (if (r.uintLessThan(u32, 8) == 0) 31 else kt.dst(r)), // fcvtzs, fcvtzu
     }
     // Half the time the flags of this op alone: FPSR into a register, then

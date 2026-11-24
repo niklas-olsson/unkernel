@@ -35,7 +35,7 @@ const W = jc.W;
 //   37..68   X0..X30, SP (slot s: 37 + s)
 //   69       TPIDR_EL0
 //   70       l_vtmp: with SIMD, the lane value `set` puts into a V register
-//   71..78   l_u + 0..7: more i64 scratch of one op's code (vec.zig)
+//   71..78   l_u + 0..7: more i64 scratch of one op's code (vec.zig, generic.zig)
 //   without SIMD (all i64):
 //   79..142  V halves (slot 36 + j: 79 + j)
 //   with SIMD: i64 up to 78, then v128 and i32 locals:

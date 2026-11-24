@@ -395,8 +395,9 @@ evicts 78-706 compiled blocks per step after the first.
   3.8M, 17.3M, 54.4M; gzip 16.2M, 26.4M, 8.9M, 14.7M; apk add python3
   29.4M, 31.4M, 14.8M, 9.2M. The eager site after a member's last producer
   is the largest.
-- **Generic calls left** from compiled code: FMADD (busybox `seq`: 0.25M
-  in the gzip row), OpenSSL's LD4/ST4 (11K per second of
+- **Generic calls left** from compiled code: FMADD off its fast path
+  (busybox `seq`, measured when every FMADD was a call: 0.25M in the gzip
+  row), OpenSSL's LD4/ST4 (11K per second of
   chacha20-poly1305); exclusive pairs and CASP never ran in any workload.
 - One stats boot showed an ash loop at 82% compiled with 12% of its
   instructions in tails after data-TLB misses: the direct-mapped data TLB
@@ -437,8 +438,6 @@ Apk and shell rows:
    registers was slower; kwemu.md, Rejected designs).
 2. **NZCV materialisation**: about 3%. Carrying lazy state across member
    transfers needs a runtime kind for the checked entry's stop path.
-3. **FMADD inline**: needs fparith's emulated FMA inline (no wasm FMA);
-   worth at most about 2% of the gzip row.
 
 The shared-core levers (bigger regions, self-loop exits, threshold) are in
 kwemu.md, Next steps.
