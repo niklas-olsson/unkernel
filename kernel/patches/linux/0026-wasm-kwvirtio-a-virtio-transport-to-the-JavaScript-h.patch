@@ -1,4 +1,4 @@
-From aeeb20e82fc895b06eec63a4eb8ce946937c8f2c Mon Sep 17 00:00:00 2001
+From 760e6488d7ed3baea94243a786bb0f634ebe8c26 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Sat, 21 Nov 2026 18:55:03 +0000
 Subject: [PATCH] wasm: kwvirtio, a virtio transport to the JavaScript host

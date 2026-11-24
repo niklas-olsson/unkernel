@@ -1,4 +1,4 @@
-From 8674181a80bcd064b1fac2b276d7764e39fba4bb Mon Sep 17 00:00:00 2001
+From 5522cd888c956d26b761391fc586fe230dec7e68 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Sun, 15 Nov 2026 14:41:37 +0000
 Subject: [PATCH] wasm: kwvsock: reset connections after a snapshot restore

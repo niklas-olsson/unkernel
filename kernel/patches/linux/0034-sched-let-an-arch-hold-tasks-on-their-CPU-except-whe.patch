@@ -1,4 +1,4 @@
-From 906870a61ecb7afff6b82b9094301ca3ebfcab63 Mon Sep 17 00:00:00 2001
+From cbc6b4684681307adfeca73eb0bc8d489a079231 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 16 Nov 2026 16:06:57 +0000
 Subject: [PATCH] sched: let an arch hold tasks on their CPU except where they

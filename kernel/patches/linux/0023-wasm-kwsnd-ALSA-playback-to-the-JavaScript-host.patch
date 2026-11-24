@@ -1,4 +1,4 @@
-From b1bf6cc5d082b1505e1cea0252768ef4ac606418 Mon Sep 17 00:00:00 2001
+From 56cc67bbc6080a15e42d6c8aa5d7a66c6d10657c Mon Sep 17 00:00:00 2001
 From: Pooya Parsa <pooya@pi0.io>
 Date: Sun, 15 Nov 2026 10:16:10 +0000
 Subject: [PATCH] wasm: kwsnd, ALSA playback to the JavaScript host
@@ -8,10 +8,10 @@ when the host has audio (wasm_driver_sound_init() < 0 means none, so a
 normal boot only pays for the code). With audio it is card 0 with one
 PCM (hw:0,0: /dev/snd/pcmC0D0p and controlC0), no mixer and no capture:
 U8 and S16_LE, mono or stereo, 8000-48000 Hz (continuous), up to 64 KiB
-of buffer, periods of 5 ms or more. alsa-lib's default device for an
-unknown card is plug:hw, so no PCM timer (dmix) is needed. The init
-import also returns the host's preferred rate, which the card's long
-name shows.
+of buffer, periods of 2 ms or more in a buffer of 10 ms or more.
+alsa-lib's default device for an unknown card is plug:hw, so no PCM
+timer (dmix) is needed. The init import also returns the host's
+preferred rate, which the card's long name shows.
 
 Nothing runs and nothing beyond the card is allocated until a program
 opens the PCM: the per-open state is allocated at open, and the ring is
@@ -20,17 +20,17 @@ hw_params), which is direct-mapped, so the host reads it at a plain
 linear address and mmap works through remap_pfn_range.
 
 An hrtimer on CLOCK_MONOTONIC (the host's monotonic clock) paces the
-stream every 5 to 10 ms (the period time, clamped). Each tick hands the
+stream every 2 to 10 ms (the period time, clamped). Each tick hands the
 frames the elapsed time is worth to wasm_driver_sound_write(), which
 copies them out during the call, and advances the hardware pointer by
 as much; the host's return value (frames it still has queued) becomes
 runtime->delay. Frames past appl_ptr are never sent unless the stream
 fills silence: the pointer still advances, so the core sees an underrun
-and stops the stream, and the host plays silence. A tick more than two
-ticks late (a long stay in the kernel) advances by three ticks' worth
-and skips the rest, so the queued frames play on at the normal pace
-rather than being rushed out, and the pointer never moves by a whole
-buffer.
+and stops the stream, and the host plays silence. A late tick (a long
+stay in the kernel) advances by three ticks' worth at most, or 15 ms'
+worth with ticks shorter than 5 ms, and skips the rest, so the queued
+frames play on at the normal pace rather than being rushed out, and the
+pointer never moves by a whole buffer.
 
 wasm_driver_sound_event() reports open, prepare (rate, channels,
 format), start, stop (and whether it was the end of a drain) and close.
@@ -42,8 +42,8 @@ OSS PCM emulation (/dev/dsp, which static SDL 1.2 builds use) is 29 KiB
 ---
  sound/drivers/Kconfig  |   9 ++
  sound/drivers/Makefile |   2 +
- sound/drivers/kwsnd.c  | 340 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 351 insertions(+)
+ sound/drivers/kwsnd.c  | 351 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 362 insertions(+)
  create mode 100644 sound/drivers/kwsnd.c
 
 diff --git a/sound/drivers/Kconfig b/sound/drivers/Kconfig
@@ -88,10 +88,10 @@ index a08bdd70ec9..a5abb0cf1ad 100644
  obj-$(CONFIG_SND_PCMTEST) += snd-pcmtest.o
 diff --git a/sound/drivers/kwsnd.c b/sound/drivers/kwsnd.c
 new file mode 100644
-index 00000000000..8f4e9138ec8
+index 00000000000..a10a5442ac6
 --- /dev/null
 +++ b/sound/drivers/kwsnd.c
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,351 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * kwsnd: ALSA playback to the JavaScript host (unkernel).
@@ -106,7 +106,7 @@ index 00000000000..8f4e9138ec8
 + * plain linear address.
 + *
 + * Playback is paced by an hrtimer on CLOCK_MONOTONIC, which is the host's
-+ * monotonic clock (WASI clock_time_get), every 5 to 10 ms (the period time,
++ * monotonic clock (WASI clock_time_get), every 2 to 10 ms (the period time,
 + * clamped). Each tick works out how many frames the elapsed time is worth,
 + * hands that many frames of the ring to the host with
 + * wasm_driver_sound_write() (the host copies them out during the call) and
@@ -119,12 +119,13 @@ index 00000000000..8f4e9138ec8
 + * time is worth more than the queued frames, the pointer still advances
 + * (so the core sees the underrun and stops the stream, or, with silence
 + * filling as dmix uses, keeps running) but only the written part goes to
-+ * the host, which plays silence for the rest. A tick that comes more than
-+ * two ticks late (a long stay in the kernel, a host that did not run)
-+ * advances by three ticks' worth at most and skips the rest of the missed
-+ * time: the queued frames then play on at the normal pace instead of
-+ * being rushed out, the program sees no underrun from the stall alone, and
-+ * the pointer never moves by a whole buffer, which the core cannot see.
++ * the host, which plays silence for the rest. A tick that comes late (a
++ * long stay in the kernel, a host that did not run) advances by three
++ * ticks' worth at most (15 ms' worth with ticks shorter than 5 ms, so a
++ * short period tolerates the same stall) and skips the rest of the missed
++ * time: the queued frames then play on at the normal pace instead of being
++ * rushed out, the program sees no underrun from the stall alone, and the
++ * pointer never moves by a whole buffer, which the core cannot see.
 + *
 + * A tick reports to the core (snd_pcm_period_elapsed()) only when the
 + * pointer crossed a period boundary or reached appl_ptr (the end of a
@@ -157,8 +158,12 @@ index 00000000000..8f4e9138ec8
 +#define KWSND_EV_START		3
 +#define KWSND_EV_STOP		4	/* rate = 1 when the stream drained */
 +
-+#define KWSND_TICK_MIN_NS	(5 * NSEC_PER_MSEC)
++#define KWSND_TICK_MIN_NS	(2 * NSEC_PER_MSEC)
 +#define KWSND_TICK_MAX_NS	(10 * NSEC_PER_MSEC)
++/* The shortest buffer: a short period is no reason for less slack. */
++#define KWSND_BUFFER_MIN_NS	(10 * NSEC_PER_MSEC)
++/* A late tick hands over this much at least, however short the tick. */
++#define KWSND_BURST_MIN_NS	(15 * NSEC_PER_MSEC)
 +
 +/* Host imports, module "unkernel". None of them suspends. */
 +/* < 0: no audio. Else the host's preferred rate in Hz (0: no preference). */
@@ -233,7 +238,7 @@ index 00000000000..8f4e9138ec8
 +	want = due > s->played ? due - s->played : 0;
 +	if (want > s->burst) {
 +		/*
-+		 * Late by more than two ticks (a long stay in the kernel, a host
++		 * Late by more than the burst (a long stay in the kernel, a host
 +		 * that did not run): skip the missed time instead of catching up,
 +		 * so the queued frames still play at the normal pace.
 +		 */
@@ -306,6 +311,11 @@ index 00000000000..8f4e9138ec8
 +						   SNDRV_PCM_HW_PARAM_PERIOD_TIME,
 +						   KWSND_TICK_MIN_NS / NSEC_PER_USEC,
 +						   UINT_MAX);
++	if (err >= 0)
++		err = snd_pcm_hw_constraint_minmax(runtime,
++						   SNDRV_PCM_HW_PARAM_BUFFER_TIME,
++						   KWSND_BUFFER_MIN_NS / NSEC_PER_USEC,
++						   UINT_MAX);
 +	if (err < 0) {
 +		kfree(s);
 +		return err;
@@ -335,7 +345,8 @@ index 00000000000..8f4e9138ec8
 +	hrtimer_cancel(&s->timer);
 +	s->tick_ns = clamp_t(u64, period_ns, KWSND_TICK_MIN_NS, KWSND_TICK_MAX_NS);
 +	s->burst = min_t(u64, runtime->buffer_size - 1,
-+			 div_u64(3 * s->tick_ns * runtime->rate, NSEC_PER_SEC));
++			 div_u64(max_t(u64, 3 * s->tick_ns, KWSND_BURST_MIN_NS) *
++				 runtime->rate, NSEC_PER_SEC));
 +	runtime->delay = 0;
 +	wasm_driver_sound_event(KWSND_EV_PREPARE, runtime->rate,
 +				runtime->channels, runtime->format);

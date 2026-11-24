@@ -1,4 +1,4 @@
-From 0b3add7f4bf282a9730a0a44ebb4a155e38e44d0 Mon Sep 17 00:00:00 2001
+From 125a53758d516849f6de75ccc9b4441d4e7576f0 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Tue, 17 Nov 2026 09:05:49 +0000
 Subject: [PATCH] wasm: take a free spinlock out of turn (kw_spin_unfair=, SMP)

@@ -1,4 +1,4 @@
-From a50ea4cda9c9b4004b66fc61c948dd372437dc53 Mon Sep 17 00:00:00 2001
+From fa5bcc8253ffe215d39d1bb0244ace647746ed63 Mon Sep 17 00:00:00 2001
 From: Pooya Parsa <pooya@pi0.io>
 Date: Sun, 15 Nov 2026 10:16:10 +0000
 Subject: [PATCH] wasm: kwvsock, an AF_VSOCK transport to the JavaScript host

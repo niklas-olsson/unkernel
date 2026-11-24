@@ -1,4 +1,4 @@
-From 3bb4d10b58a68042410cdbb0dbff6e5b2ec89fcc Mon Sep 17 00:00:00 2001
+From f44accde67e0ded2323f21b81091e5e17d0db80b Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 16 Nov 2026 16:07:10 +0000
 Subject: [PATCH] wasm: SMP

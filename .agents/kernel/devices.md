@@ -126,9 +126,10 @@ no mixer, no capture, no PCM timer, no `/proc/asound`.
   which the host copies during the call and answers with the frames it has
   queued.
 - A kernel timer on the host's monotonic clock hands over the frames the
-  elapsed time is worth every 5-10 ms; no IRQ bit. A late tick hands over
-  at most three ticks' worth, and an underrun stops the stream, so nothing
-  spins.
+  elapsed time is worth every 2-10 ms (the period, 2 ms or more, in a
+  buffer of 10 ms or more); no IRQ bit. A late tick hands over at most
+  three ticks' worth (15 ms' worth when ticks are shorter than 5 ms), and
+  an underrun stops the stream, so nothing spins.
 
 ## kwvsock (AF_VSOCK)
 

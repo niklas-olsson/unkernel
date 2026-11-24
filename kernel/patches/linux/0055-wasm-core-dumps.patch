@@ -1,4 +1,4 @@
-From c9a684915fedf524eff12a98305322cdb970c004 Mon Sep 17 00:00:00 2001
+From dec59e088d617b262c5d6226e8c6d340e1319dc2 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 23 Nov 2026 23:00:37 +0000
 Subject: [PATCH] wasm: core dumps

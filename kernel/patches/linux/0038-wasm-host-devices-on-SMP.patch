@@ -1,4 +1,4 @@
-From 44f27c58da220ee20ba3f8462b3d5a667d07aa5a Mon Sep 17 00:00:00 2001
+From 6e055af643c4e4b34c7046647c82d178adb45f50 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 16 Nov 2026 16:07:10 +0000
 Subject: [PATCH] wasm: host devices on SMP
@@ -415,10 +415,10 @@ index 90cb8521bb3..4c088366a0c 100644
  
  err_irq:
 diff --git a/sound/drivers/kwsnd.c b/sound/drivers/kwsnd.c
-index 8f4e9138ec8..d8e0be82cbb 100644
+index a10a5442ac6..31da6ef241c 100644
 --- a/sound/drivers/kwsnd.c
 +++ b/sound/drivers/kwsnd.c
-@@ -306,6 +306,11 @@ static int __init kwsnd_init(void)
+@@ -317,6 +317,11 @@ static int __init kwsnd_init(void)
  		pr_info("kwsnd: no host audio\n");
  		return 0;
  	}

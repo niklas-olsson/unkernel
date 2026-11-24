@@ -1,4 +1,4 @@
-From 44885b0596c2ae4d63699bd02b16f3e0d84b6502 Mon Sep 17 00:00:00 2001
+From 13fcbbc8f815731f09d3deaf9a4bed577a44c99e Mon Sep 17 00:00:00 2001
 From: Pooya Parsa <pooya@pi0.io>
 Date: Sun, 15 Nov 2026 10:16:10 +0000
 Subject: [PATCH] wasm: add kw_defconfig

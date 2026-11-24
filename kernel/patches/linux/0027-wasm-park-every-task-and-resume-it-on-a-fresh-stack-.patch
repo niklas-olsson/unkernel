@@ -1,4 +1,4 @@
-From 5708992022afc0624e39016ad2552d5fec2cf70c Mon Sep 17 00:00:00 2001
+From 35a1567525d86d3e493c5a80cc471546e26443b4 Mon Sep 17 00:00:00 2001
 From: Pooya Parsa <pooya@pi0.io>
 Date: Sun, 15 Nov 2026 13:43:35 +0000
 Subject: [PATCH] wasm: park every task and resume it on a fresh stack, and

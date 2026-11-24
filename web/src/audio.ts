@@ -3,7 +3,7 @@
 // The guest's sound on the page (kwsnd; on unless ?sound=0): a SoundSink
 // for the SDK (js/core/sound.ts) that plays the PCM with Web Audio.
 //
-// - The kernel hands over PCM from a timer every 5-10 ms, from inside a
+// - The kernel hands over PCM from a timer every 2-10 ms, from inside a
 //   synchronous import, while the main thread is busy running the guest
 //   (it only gets back to its event loop at the kernel's 20 ms yields and
 //   when idle). So the chunks are posted at once to an AudioWorklet, whose

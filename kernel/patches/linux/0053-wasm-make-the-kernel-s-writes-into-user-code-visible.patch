@@ -1,4 +1,4 @@
-From 1aa0ce50c13a457311e6ab6ffd245d91944d0025 Mon Sep 17 00:00:00 2001
+From b969c2d110d8d99f2e63775d641ef6a9c37f3384 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 23 Nov 2026 22:48:26 +0000
 Subject: [PATCH] wasm: make the kernel's writes into user code visible to

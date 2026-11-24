@@ -1,4 +1,4 @@
-From c5b794ce5f619aa14e9294ce04feacbcf06f6c81 Mon Sep 17 00:00:00 2001
+From a344a230ff57b724438bf0c29756c02fcbf78716 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 16 Nov 2026 23:07:54 +0000
 Subject: [PATCH] wasm: block instead of spinning for another CPU (SMP)

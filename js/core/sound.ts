@@ -11,7 +11,7 @@
 // Then wasm_driver_sound_event() reports each state change: open, prepare
 // (rate, channels, ALSA format: 1 = U8, 2 = S16_LE), start, stop (with 1
 // when the stream drained) and close. While the stream runs, a kernel timer
-// on the host's monotonic clock (WASI clock_time_get) fires every 5 to 10
+// on the host's monotonic clock (WASI clock_time_get) fires every 2 to 10
 // ms and hands the frames the elapsed time is worth to
 // wasm_driver_sound_write(addr, bytes), which copies them out of kernel
 // memory during the call. The return value is how many frames the sink
