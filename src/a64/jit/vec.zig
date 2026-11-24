@@ -37,6 +37,7 @@ const kwemu = @import("../../emu/kwemu.zig");
 const jc = @import("../../emu/jitcore.zig");
 const dec = @import("../decode.zig");
 const simd_move = @import("../simd_move.zig");
+const opexec = @import("../opexec.zig");
 const jit = @import("emit.zig");
 const cm = @import("common.zig");
 const Use = jit.Use;
@@ -131,6 +132,23 @@ pub const Kind = enum(u8) {
     sha512h2,
     sha512su0,
     sha512su1,
+    /// FP binary ops (FADD, FSUB, FMUL, FDIV, vector & by-element FMUL): x
+    /// 0 add, 1 sub, 2 mul, 3 div; size 2 S, 3 D
+    fp_bin,
+    /// FP min/max (FMAX, FMIN, FMAXNM, FMINNM): size 2 S, 3 D
+    fp_minmax,
+    /// FMLA (x 0), FMLS (x 1) (vector & by-element, S lanes only)
+    fp_mla,
+    /// FSQRT (vector): size 2 S, 3 D
+    fp_sqrt,
+    /// FP compare (FCMEQ, FCMGE, FCMGT): size 2 S, 3 D
+    fp_cmp,
+    /// FP compare with zero (FCMGT/FCMEQ/FCMLT/FCMGE/FCMLE #0): size 2 S, 3 D
+    fp_cmp0,
+    /// SCVTF (x 0), UCVTF (x 1) (vector, S lanes)
+    fp_cvtf,
+    /// FCVTZS (x 0), FCVTZU (x 1) (vector, S lanes)
+    fp_cvtz,
 };
 
 pub const V = struct {
@@ -144,6 +162,8 @@ pub const V = struct {
     sh: u8 = 0,
     code: u16 = 0,
     code2: u16 = 0,
+    /// Per kind: a mask, constant, step or offset; for the AdvSIMD FP
+    /// kinds with a slow path, the raw word its call passes.
     imm: u64 = 0,
     idx: [16]u8 = @splat(0),
     /// By element: Vm is its element broadcast by `bidx`.
@@ -262,8 +282,9 @@ fn arith(raw: u32) ?V {
     return null;
 }
 
-/// simd_long.indexed (vector): MUL, MLA, MLS, [SU]MULL, [SU]MLAL, [SU]MLSL
-/// by element, as the vector op with the element of Vm broadcast.
+/// simd_long.indexed (vector): MUL, MLA, MLS, [SU]MULL, [SU]MLAL, [SU]MLSL,
+/// and FP FMUL, FMLA, FMLS by element, as the vector op with the element
+/// of Vm broadcast.
 fn byElem(raw: u32) ?V {
     var v = regs3(raw, .mla);
     const u = bit(raw, 29);
@@ -271,6 +292,31 @@ fn byElem(raw: u32) ?V {
     const opcode = bits(raw, 15, 12);
     const h: u8 = @intFromBool(bit(raw, 11));
     const l: u8 = @intFromBool(bit(raw, 21));
+    if (opcode == 0b0001 or opcode == 0b0101 or opcode == 0b1001) {
+        if (u or !bit(raw, 23)) return null;
+        const dbl = bit(raw, 22);
+        if (dbl and (l != 0 or !v.q)) return null;
+        const index: u8 = if (dbl) h else (h << 1) | l;
+        const esz: u8 = if (dbl) 8 else 4;
+        v.imm = raw;
+        v.size = if (dbl) 3 else 2;
+        v.bc = true;
+        for (0..16) |i| v.bidx[i] = index * esz + @as(u8, @intCast(i)) % esz;
+        switch (opcode) {
+            0b1001 => { // FMUL by element
+                v.k = .fp_bin;
+                v.x = 2;
+                v.code = if (dbl) cm.S.f64x2_mul else cm.S.f32x4_mul;
+            },
+            0b0001, 0b0101 => { // FMLA, FMLS by element (single only)
+                if (dbl) return null;
+                v.k = .fp_mla;
+                v.x = @intFromBool(opcode == 0b0101);
+            },
+            else => unreachable,
+        }
+        return v;
+    }
     const index: u8 = switch (z) {
         1 => blk: {
             v.m = @intCast(bits(raw, 19, 16));
@@ -311,6 +357,7 @@ fn threeSame(raw: u32, sc: bool) ?V {
     var v = regs3(raw, .bin);
     const u = bit(raw, 29);
     const opcode = bits(raw, 15, 11);
+    if (opcode >= 0b11000) return if (sc) null else threeSameFp(raw);
     const z = v.size;
     if (sc) {
         if (z != 3) return null;
@@ -363,6 +410,61 @@ fn threeSame(raw: u32, sc: bool) ?V {
                 if (z == 3) return null;
                 v.code = if (opcode == 0b10100) (if (u) op_max_u[z] else op_max_s[z]) else (if (u) op_min_u[z] else op_min_s[z]);
             }
+        },
+        else => return null,
+    }
+    return v;
+}
+
+/// simd_fp.threeSame (vector only): FADD, FSUB, FMUL, FDIV, FMAX, FMIN,
+/// FMAXNM, FMINNM, FMLA, FMLS, FCMEQ, FCMGE, FCMGT (2S, 4S, 2D; FMLA/FMLS S
+/// only).
+fn threeSameFp(raw: u32) ?V {
+    var v = regs3(raw, .fp_bin);
+    const u = bit(raw, 29);
+    const a = bit(raw, 23);
+    const dbl = bit(raw, 22);
+    if (dbl and !v.q) return null;
+    v.imm = raw;
+    v.size = if (dbl) 3 else 2;
+    const k = (@as(u32, @intFromBool(u)) << 6) | (@as(u32, @intFromBool(a)) << 5) | bits(raw, 15, 11);
+    switch (k) {
+        0b0_0_11010 => {
+            v.x = 0;
+            v.code = if (dbl) cm.S.f64x2_add else cm.S.f32x4_add;
+        },
+        0b0_1_11010 => {
+            v.x = 1;
+            v.code = if (dbl) cm.S.f64x2_sub else cm.S.f32x4_sub;
+        },
+        0b1_0_11011 => {
+            v.x = 2;
+            v.code = if (dbl) cm.S.f64x2_mul else cm.S.f32x4_mul;
+        },
+        0b1_0_11111 => {
+            v.x = 3;
+            v.code = if (dbl) cm.S.f64x2_div else cm.S.f32x4_div;
+        },
+        0b0_0_11000, 0b0_0_11110, 0b0_1_11000, 0b0_1_11110 => {
+            v.k = .fp_minmax;
+            v.code = if (a) (if (dbl) cm.S.f64x2_min else cm.S.f32x4_min) else (if (dbl) cm.S.f64x2_max else cm.S.f32x4_max);
+        },
+        0b0_0_11001, 0b0_1_11001 => {
+            if (dbl) return null;
+            v.k = .fp_mla;
+            v.x = @intFromBool(a);
+        },
+        0b0_0_11100 => {
+            v.k = .fp_cmp;
+            v.code = if (dbl) cm.S.f64x2_eq else cm.S.f32x4_eq;
+        },
+        0b1_0_11100 => {
+            v.k = .fp_cmp;
+            v.code = if (dbl) cm.S.f64x2_ge else cm.S.f32x4_ge;
+        },
+        0b1_1_11100 => {
+            v.k = .fp_cmp;
+            v.code = if (dbl) cm.S.f64x2_gt else cm.S.f32x4_gt;
         },
         else => return null,
     }
@@ -500,6 +602,61 @@ fn misc(raw: u32) ?V {
             if (u or z == 3) return null;
             v.k = .narrow;
             narrowIdx(&v);
+        },
+        else => return miscFp(raw),
+    }
+    return v;
+}
+
+/// simd_fp.twoRegMisc (vector): FABS, FNEG, FSQRT, FCM{GT,EQ,LT,GE,LE} #0,
+/// SCVTF/UCVTF (S), FCVTZS/FCVTZU (S).
+fn miscFp(raw: u32) ?V {
+    var v = regs3(raw, .un);
+    const u = bit(raw, 29);
+    const a = bit(raw, 23);
+    const dbl = bit(raw, 22);
+    if (dbl and !v.q) return null;
+    v.imm = raw;
+    v.size = if (dbl) 3 else 2;
+    const k = (@as(u32, @intFromBool(u)) << 6) | (@as(u32, @intFromBool(a)) << 5) | bits(raw, 16, 12);
+    switch (k) {
+        0b0_1_01111 => v.code = if (dbl) cm.S.f64x2_abs else cm.S.f32x4_abs,
+        0b1_1_01111 => v.code = if (dbl) cm.S.f64x2_neg else cm.S.f32x4_neg,
+        0b1_1_11111 => {
+            v.k = .fp_sqrt;
+            v.code = if (dbl) cm.S.f64x2_sqrt else cm.S.f32x4_sqrt;
+        },
+        0b0_1_01100 => {
+            v.k = .fp_cmp0;
+            v.code = if (dbl) cm.S.f64x2_gt else cm.S.f32x4_gt;
+        },
+        0b0_1_01101 => {
+            v.k = .fp_cmp0;
+            v.code = if (dbl) cm.S.f64x2_eq else cm.S.f32x4_eq;
+        },
+        0b0_1_01110 => {
+            v.k = .fp_cmp0;
+            v.code = if (dbl) cm.S.f64x2_lt else cm.S.f32x4_lt;
+        },
+        0b1_1_01100 => {
+            v.k = .fp_cmp0;
+            v.code = if (dbl) cm.S.f64x2_ge else cm.S.f32x4_ge;
+        },
+        0b1_1_01101 => {
+            v.k = .fp_cmp0;
+            v.code = if (dbl) cm.S.f64x2_le else cm.S.f32x4_le;
+        },
+        0b0_0_11101, 0b1_0_11101 => {
+            if (dbl) return null;
+            v.k = .fp_cvtf;
+            v.x = @intFromBool(u);
+            v.code = if (u) cm.S.f32x4_convert_i32x4_u else cm.S.f32x4_convert_i32x4_s;
+        },
+        0b0_1_11011, 0b1_1_11011 => {
+            if (dbl) return null;
+            v.k = .fp_cvtz;
+            v.x = @intFromBool(u);
+            v.code = if (u) cm.S.i32x4_trunc_sat_f32x4_u else cm.S.i32x4_trunc_sat_f32x4_s;
         },
         else => return null,
     }
@@ -881,10 +1038,10 @@ fn xs(r: u8) u8 {
 pub fn usage(v: V) Use {
     const nm = vr(v.n).with(vr(v.m));
     return switch (v.k) {
-        .bin, .shlreg, .cmtst, .cmhu64, .pair, .pmull => nm.with(vw(v.d)),
-        .un, .cmz, .shift, .shll, .across, .paird, .aesmc, .aesimc, .sha1h => vr(v.n).with(vw(v.d)),
+        .bin, .shlreg, .cmtst, .cmhu64, .pair, .pmull, .fp_bin, .fp_minmax, .fp_cmp => nm.with(vw(v.d)),
+        .un, .cmz, .shift, .shll, .across, .paird, .aesmc, .aesimc, .sha1h, .fp_sqrt, .fp_cmp0, .fp_cvtf, .fp_cvtz => vr(v.n).with(vw(v.d)),
         .sra, .ins_shift, .narrow, .aese, .aesd, .sha256su0, .sha1su1, .sha512su0 => vr(v.n).with(vr(v.d)).with(vw(v.d)),
-        .bsl, .long, .mla, .sha1c, .sha1p, .sha1m, .sha1su0, .sha256h, .sha256h2, .sha256su1, .sha512h, .sha512h2, .sha512su1 => nm.with(vr(v.d)).with(vw(v.d)),
+        .bsl, .long, .mla, .fp_mla, .sha1c, .sha1p, .sha1m, .sha1su0, .sha256h, .sha256h2, .sha256su1, .sha512h, .sha512h2, .sha512su1 => nm.with(vr(v.d)).with(vw(v.d)),
         .shuf => (switch (v.x) {
             0 => nm,
             1, 3 => vr(v.n),
@@ -918,6 +1075,7 @@ pub fn usage(v: V) Use {
 /// The op's feature is implemented and on (kw_set_isa) for e's CPU; else
 /// the interpreter runs it (and raises ILLEGAL).
 pub fn enabled(e: *Emit, v: V) bool {
+    if (!e.simd) return false;
     const f = v.feat orelse return true;
     return c.implemented & c.featureBit(f) != 0 and e.cpu().priv.a64.isa & c.featureBit(f) != 0;
 }
@@ -928,6 +1086,13 @@ fn k128(e: *Emit, lo: u64, hi: u64) void {
     e.vop(cm.S.v128_const);
     for (0..8) |i| e.op(@truncate(lo >> @intCast(8 * i)));
     for (0..8) |i| e.op(@truncate(hi >> @intCast(8 * i)));
+}
+fn k32x4(e: *Emit, x: u32) void {
+    const p: u64 = (@as(u64, x) << 32) | x;
+    k128(e, p, p);
+}
+fn k64x2(e: *Emit, x: u64) void {
+    k128(e, x, x);
 }
 fn shuffle(e: *Emit, idx: [16]u8) void {
     e.vop(cm.S.i8x16_shuffle);
@@ -1363,7 +1528,368 @@ pub fn emit(e: *Emit, v: V, at: At) void {
             vop(e, op_add[3]);
             cm.setV(e, v.d);
         },
+        .fp_bin => emitFpBin(e, v, at),
+        .fp_minmax => emitFpMinmax(e, v, at),
+        .fp_mla => emitFpMla(e, v, at),
+        .fp_sqrt => emitFpSqrt(e, v, at),
+        .fp_cmp => emitFpCmp(e, v, at),
+        .fp_cmp0 => emitFpCmp0(e, v, at),
+        .fp_cvtf => emitFpCvtf(e, v, at),
+        .fp_cvtz => emitFpCvtz(e, v, at),
     }
+}
+
+// ---- AdvSIMD FP fast paths --------------------------------------------------------
+
+const fpcr_off = cm.off(ops.nzcv_slot) + 4;
+const fpsr_off = fpcr_off + 4;
+const fpcr_fast_mask: i32 = @bitCast(c.FPCR_FZ | (3 << c.FPCR_RMODE_SHIFT));
+
+fn fpcrFast(e: *Emit) void {
+    e.get(jc.l_x);
+    e.addr();
+    e.mem(W.i32_load, 2, fpcr_off);
+    e.k32(fpcr_fast_mask);
+    e.op(W.i32_and);
+    e.op(W.i32_eqz);
+}
+fn fzClear(e: *Emit) void {
+    e.get(jc.l_x);
+    e.addr();
+    e.mem(W.i32_load, 2, fpcr_off);
+    e.k32(@bitCast(c.FPCR_FZ));
+    e.op(W.i32_and);
+    e.op(W.i32_eqz);
+}
+fn ixcSet(e: *Emit) void {
+    e.get(jc.l_x);
+    e.addr();
+    e.mem(W.i32_load, 2, fpsr_off);
+    e.k32(@ctz(c.FPSR_IXC));
+    e.op(W.i32_shr_u);
+    e.k32(1);
+    e.op(W.i32_and);
+}
+
+/// Slow path for AdvSIMD FP: flush only the V registers `v` reads, run the
+/// interpreter once, and reload `Vd` without disturbing unrelated locals.
+fn vecFpSlow(e: *Emit, v: V, at: At) void {
+    if (!e.table) {
+        e.handBack(at.k, at.pc);
+        return;
+    }
+    cm.storeV(e, v.n);
+    if ((v.k == .fp_bin or v.k == .fp_minmax or v.k == .fp_mla or v.k == .fp_cmp) and v.m != v.n) cm.storeV(e, v.m);
+    if (v.k == .fp_mla and v.d != v.n and v.d != v.m) cm.storeV(e, v.d);
+    e.get(jc.l_x);
+    e.get(jc.l_cpu);
+    e.k64(v.imm);
+    e.k64(at.pc);
+    e.callTable(@intFromPtr(&opexec.jitGeneric));
+    e.op(W.drop);
+    cm.loadV(e, v.d);
+}
+
+/// Push Vn (`m = false`) or getM (`m = true`), replacing lanes 2..3 with
+/// `neutral` when Q = 0 so inactive high lanes never poison vector checks.
+fn normOp(e: *Emit, v: V, m: bool, neutral: u32) void {
+    if (m) getM(e, v) else get(e, v.n);
+    if (v.q) return;
+    k32x4(e, neutral);
+    shuffle(e, .{ 0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31 });
+}
+
+fn inRangeMask(e: *Emit, l: u32, dbl: bool) void {
+    if (dbl) {
+        e.get(l);
+        e.k32(1);
+        e.vop(cm.S.i64x2_shl);
+        e.k32(53);
+        e.vop(cm.S.i64x2_shr_u);
+        e.set(lq + 5);
+        e.get(lq + 5);
+        k64x2(e, 1);
+        e.vop(cm.S.i64x2_gt_s);
+        e.get(lq + 5);
+        k64x2(e, 2046);
+        e.vop(cm.S.i64x2_lt_s);
+        e.vop(v128_and);
+    } else {
+        e.get(l);
+        e.k32(1);
+        e.vop(cm.S.i32x4_shl);
+        e.k32(24);
+        e.vop(cm.S.i32x4_shr_u);
+        k32x4(e, 2);
+        e.vop(cm.S.i32x4_sub);
+        k32x4(e, 252);
+        e.vop(cm.S.i32x4_lt_u);
+    }
+}
+
+fn isZeroMask(e: *Emit, l: u32, dbl: bool) void {
+    e.get(l);
+    e.k32(1);
+    e.vop(if (dbl) cm.S.i64x2_shl else cm.S.i32x4_shl);
+    k128(e, 0, 0);
+    e.vop(if (dbl) cm.S.i64x2_eq else cm.S.i32x4_eq);
+}
+
+fn emitFpBin(e: *Emit, v: V, at: At) void {
+    const dbl = v.size == 3;
+    const a_loc = lq;
+    const b_loc = lq + 1;
+    const r_loc = lq + 2;
+    normOp(e, v, false, 0x4080_0000); // 4.0f
+    e.set(a_loc);
+    normOp(e, v, true, 0x3f80_0000); // 1.0f
+    e.set(b_loc);
+    e.get(a_loc);
+    e.get(b_loc);
+    vop(e, v.code);
+    e.set(r_loc);
+    inRangeMask(e, r_loc, dbl);
+    isZeroMask(e, r_loc, dbl);
+    if (v.x == 2) {
+        isZeroMask(e, a_loc, dbl);
+        isZeroMask(e, b_loc, dbl);
+        e.vop(v128_or);
+        e.vop(v128_and);
+    } else if (v.x == 3) {
+        isZeroMask(e, a_loc, dbl);
+        e.vop(v128_and);
+    }
+    e.vop(v128_or);
+    e.vop(if (dbl) cm.S.i64x2_all_true else cm.S.i32x4_all_true);
+    fpcrFast(e);
+    e.op(W.i32_and);
+    ixcSet(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(r_loc);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn emitFpSqrt(e: *Emit, v: V, at: At) void {
+    const dbl = v.size == 3;
+    const r_loc = lq + 1;
+    normOp(e, v, false, 0x4080_0000);
+    vop(e, v.code);
+    e.set(r_loc);
+    inRangeMask(e, r_loc, dbl);
+    isZeroMask(e, r_loc, dbl);
+    e.vop(v128_or);
+    e.vop(if (dbl) cm.S.i64x2_all_true else cm.S.i32x4_all_true);
+    fpcrFast(e);
+    e.op(W.i32_and);
+    ixcSet(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(r_loc);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn emitFpMinmax(e: *Emit, v: V, at: At) void {
+    const dbl = v.size == 3;
+    const r_loc = lq;
+    normOp(e, v, false, 0x4080_0000);
+    normOp(e, v, true, 0x3f80_0000);
+    vop(e, v.code);
+    e.set(r_loc);
+    e.get(r_loc);
+    e.get(r_loc);
+    e.vop(if (dbl) cm.S.f64x2_eq else cm.S.f32x4_eq);
+    e.vop(if (dbl) cm.S.i64x2_all_true else cm.S.i32x4_all_true);
+    fzClear(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(r_loc);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn emitFpCmp(e: *Emit, v: V, at: At) void {
+    const dbl = v.size == 3;
+    const eq: u32 = if (dbl) cm.S.f64x2_eq else cm.S.f32x4_eq;
+    const a_loc = lq;
+    const b_loc = lq + 1;
+    normOp(e, v, false, 0x4080_0000);
+    e.set(a_loc);
+    normOp(e, v, true, 0x3f80_0000);
+    e.set(b_loc);
+    e.get(a_loc);
+    e.get(a_loc);
+    e.vop(eq);
+    e.get(b_loc);
+    e.get(b_loc);
+    e.vop(eq);
+    e.vop(v128_and);
+    e.vop(if (dbl) cm.S.i64x2_all_true else cm.S.i32x4_all_true);
+    fzClear(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(a_loc);
+    e.get(b_loc);
+    vop(e, v.code);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn emitFpCmp0(e: *Emit, v: V, at: At) void {
+    const dbl = v.size == 3;
+    const eq: u32 = if (dbl) cm.S.f64x2_eq else cm.S.f32x4_eq;
+    const a_loc = lq;
+    normOp(e, v, false, 0x4080_0000);
+    e.set(a_loc);
+    e.get(a_loc);
+    e.get(a_loc);
+    e.vop(eq);
+    e.vop(if (dbl) cm.S.i64x2_all_true else cm.S.i32x4_all_true);
+    fzClear(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(a_loc);
+    k128(e, 0, 0);
+    vop(e, v.code);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn pushHalfF64(e: *Emit, l: u32, hi: bool) void {
+    e.get(l);
+    if (hi) {
+        k128(e, 0, 0);
+        shuffle(e, .{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+    }
+    e.vop(cm.S.f64x2_promote_low_f32x4);
+}
+
+/// Compute d ± a * b for one pair of single lanes via f64 (exact product),
+/// demote to r_loc (upper 64 bits zeroed), and push the i64x2 "bit-exact" mask.
+fn emitMlaPair(e: *Emit, l_a: u32, l_b: u32, l_d: u32, hi: bool, sub: bool, s_loc: u32, r_loc: u32) void {
+    pushHalfF64(e, l_d, hi);
+    pushHalfF64(e, l_a, hi);
+    if (sub) e.vop(cm.S.f64x2_neg);
+    pushHalfF64(e, l_b, hi);
+    e.vop(cm.S.f64x2_mul);
+    e.vop(cm.S.f64x2_add);
+    e.tee(s_loc);
+    e.vop(cm.S.f32x4_demote_f64x2_zero);
+    e.set(r_loc);
+    e.get(s_loc);
+    e.k32(1);
+    e.vop(cm.S.i64x2_shl);
+    e.k32(53);
+    e.vop(cm.S.i64x2_shr_u);
+    e.set(lq + 5);
+    e.get(lq + 5);
+    k64x2(e, 897);
+    e.vop(cm.S.i64x2_gt_s);
+    e.get(lq + 5);
+    k64x2(e, 1150);
+    e.vop(cm.S.i64x2_lt_s);
+    e.vop(v128_and);
+    e.get(s_loc);
+    k64x2(e, 0x1fff_ffff);
+    e.vop(v128_and);
+    k64x2(e, 0x1000_0000);
+    e.vop(cm.S.i64x2_ne);
+    e.vop(v128_and);
+    isZeroMask(e, s_loc, true);
+    e.vop(v128_or);
+}
+
+fn emitFpMla(e: *Emit, v: V, at: At) void {
+    const sub = v.x == 1;
+    const m_loc = lq;
+    const s_loc = lq + 1;
+    const r0_loc = lq + 2;
+    const r1_loc = lq + 3;
+    const ok_loc = lq + 4;
+    const a_loc = cm.vloc(v.n & 31);
+    const d_loc = cm.vloc(v.d & 31);
+    getM(e, v);
+    e.set(m_loc);
+    emitMlaPair(e, a_loc, m_loc, d_loc, false, sub, s_loc, r0_loc);
+    if (v.q) {
+        e.set(ok_loc);
+        emitMlaPair(e, a_loc, m_loc, d_loc, true, sub, s_loc, r1_loc);
+        e.get(ok_loc);
+        e.vop(v128_and);
+    }
+    e.vop(cm.S.i64x2_all_true);
+    fpcrFast(e);
+    e.op(W.i32_and);
+    ixcSet(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(r0_loc);
+    if (v.q) {
+        e.get(r1_loc);
+        shuffle(e, .{ 0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23 });
+    }
+    cm.setV(e, v.d);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn emitFpCvtf(e: *Emit, v: V, at: At) void {
+    fpcrFast(e);
+    ixcSet(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    get(e, v.n);
+    vop(e, v.code);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
+}
+
+fn emitFpCvtz(e: *Emit, v: V, at: At) void {
+    const a_loc = lq;
+    normOp(e, v, false, 0x4080_0000);
+    e.set(a_loc);
+    e.get(a_loc);
+    if (v.x == 1) {
+        k32x4(e, 0xbf80_0000); // -1.0f
+        e.vop(cm.S.f32x4_gt);
+        e.get(a_loc);
+        k32x4(e, 0x4f80_0000); // 2^32
+        e.vop(cm.S.f32x4_lt);
+    } else {
+        k32x4(e, 0xcf00_0000); // -2^31
+        e.vop(cm.S.f32x4_ge);
+        e.get(a_loc);
+        k32x4(e, 0x4f00_0000); // 2^31
+        e.vop(cm.S.f32x4_lt);
+    }
+    e.vop(v128_and);
+    e.vop(cm.S.i32x4_all_true);
+    fzClear(e);
+    e.op(W.i32_and);
+    ixcSet(e);
+    e.op(W.i32_and);
+    e.open(W.@"if", W.void_t);
+    e.get(a_loc);
+    vop(e, v.code);
+    cm.setVq(e, v.d, v.q);
+    e.op(W.@"else");
+    vecFpSlow(e, v, at);
+    e.close();
 }
 
 /// Push ror(x, k0) ^ ror(x, k1) ^ (x >> k2) per 32/64-bit lane of local l.
@@ -2067,9 +2593,117 @@ fn genLd1(r: std.Random, out: []u32, pc: u64) usize {
     return 3;
 }
 
+fn genFpVec(r: std.Random, out: []u32, pc: u64) usize {
+    _ = pc;
+    const vd = vreg(r);
+    const vn = vreg(r);
+    const vm = vreg(r);
+    const q = r.uintLessThan(u32, 2) << 30;
+    const dbl = r.uintLessThan(u32, 2) << 22;
+    const x9: u32 = 9;
+    const rr = (vm << 16) | (vn << 5) | vd;
+    switch (r.uintLessThan(u32, 18)) {
+        0, 1 => { // edge f32 vector or lane insert
+            const exps = [_]u32{ 0, 1, 2, 126, 127, 128, 158, 159, 253, 254, 255 };
+            const mids = [_]u32{ 0x0000_0000, 0x8000_0000, 0x0000_0001, 0x007f_ffff, 0x0080_0000, 0x0080_0001, 0x0100_0000, 0x3380_0000, 0x3f80_0000, 0x3f80_0001, 0xbf00_0000, 0xbf80_0000, 0xbf80_0001, 0x4f00_0000, 0xcf00_0000, 0x4f80_0000, 0x7f7f_ffff, 0x7f80_0000, 0x7fc0_0042, 0x7f80_0042 };
+            if (r.boolean()) {
+                const w = mids[r.uintLessThan(usize, mids.len)] ^ (r.uintLessThan(u32, 2) << 31);
+                out[0] = 0x5280_0000 | ((w & 0xffff) << 5) | x9; // movz w9, #lo
+                out[1] = 0x72a0_0000 | (((w >> 16) & 0xffff) << 5) | x9; // movk w9, #hi, lsl 16
+            } else {
+                const top = (r.uintLessThan(u32, 2) << 15) | (exps[r.uintLessThan(usize, exps.len)] << 7) | pick(r, u32, &.{ 0, 1, 0x40, 0x7f });
+                out[0] = 0x52a0_0000 | (top << 5) | x9; // movz w9, #top, lsl 16
+                out[1] = 0x7280_0000 | (pick(r, u32, &.{ 0, 1, 0xffff }) << 5) | x9;
+            }
+            if (r.uintLessThan(u32, 3) == 0) {
+                const lane = r.uintLessThan(u32, 4);
+                out[2] = 0x4e04_1c00 | (lane << 19) | (x9 << 5) | vd; // ins vD.s[lane], w9
+            } else {
+                out[2] = 0x0e04_0c00 | q | (x9 << 5) | vd; // dup vD.{2,4}s, w9
+            }
+            return 3;
+        },
+        2 => { // edge f64 vector or lane insert
+            const exps = [_]u32{ 0, 1, 2, 1022, 1023, 1024, 2045, 2046, 2047 };
+            const top = (r.uintLessThan(u32, 2) << 15) | (exps[r.uintLessThan(usize, exps.len)] << 4) | pick(r, u32, &.{ 0, 1, 8, 15 });
+            out[0] = 0xd2e0_0000 | (top << 5) | x9; // movz x9, #top, lsl 48
+            out[1] = 0xf280_0000 | (pick(r, u32, &.{ 0, 1, 0xffff }) << 5) | x9;
+            if (r.boolean()) {
+                const lane = r.uintLessThan(u32, 2);
+                out[2] = 0x4e08_1c00 | (lane << 20) | (x9 << 5) | vd; // ins vD.d[lane], x9
+            } else {
+                out[2] = 0x4e08_0c00 | (x9 << 5) | vd; // dup vD.2d, x9
+            }
+            return 3;
+        },
+        3 => { // FPCR: mostly 0, else RMode / FZ / DN
+            const fc: u32 = if (r.uintLessThan(u32, 3) != 0) 0 else (r.uintLessThan(u32, 8) << 6) | (r.uintLessThan(u32, 2) << 9);
+            out[0] = 0xd2a0_0000 | (fc << 5) | x9;
+            out[1] = 0xd51b_4400 | x9; // msr fpcr, x9
+            return 2;
+        },
+        4 => { // FPSR: 0, IXC, or all flags
+            const fs = pick(r, u32, &.{ 0, 0x10, 0x9f });
+            out[0] = 0xd280_0000 | (fs << 5) | x9;
+            out[1] = 0xd51b_4420 | x9; // msr fpsr, x9
+            return 2;
+        },
+        5, 6, 7, 8 => { // three same FP (FADD, FSUB, FMUL, FDIV, FMLA, FMLS, FMIN/FMAX/NM, FCMEQ/GE/GT + neighbours)
+            const k = pick(r, u32, &.{
+                0b0_0_11000, 0b0_0_11001, 0b0_0_11010, 0b0_0_11100, 0b0_0_11110,
+                0b0_1_11000, 0b0_1_11001, 0b0_1_11010, 0b0_1_11110,
+                0b1_0_11011, 0b1_0_11100, 0b1_0_11111, 0b1_1_11100,
+                0b1_0_11010, // FADDP
+            });
+            const u = (k >> 6) & 1;
+            const a = (k >> 5) & 1;
+            const opc = k & 31;
+            out[0] = 0x0e20_0400 | q | (u << 29) | (a << 23) | dbl | (opc << 11) | rr;
+        },
+        9, 10, 11 => { // two-register misc FP (FABS, FNEG, FSQRT, zero compares, SCVTF/UCVTF, FCVTZS/ZU)
+            const k = pick(r, u32, &.{
+                0b0_1_01100, 0b0_1_01101, 0b0_1_01110, 0b0_1_01111,
+                0b1_1_01100, 0b1_1_01101, 0b1_1_01111, 0b1_1_11111,
+                0b0_0_11101, 0b1_0_11101, 0b0_1_11011, 0b1_1_11011,
+            });
+            const u = (k >> 6) & 1;
+            const a = (k >> 5) & 1;
+            const opc = k & 31;
+            out[0] = 0x0e20_0800 | q | (u << 29) | (a << 23) | dbl | (opc << 12) | (vn << 5) | vd;
+        },
+        12, 13 => { // by-element FMUL, FMLA, FMLS (+ .1d illegal neighbour when q==0, L==1)
+            const opc = pick(r, u32, &.{ 0b1001, 0b0001, 0b0101 });
+            const h = r.uintLessThan(u32, 2);
+            const l = r.uintLessThan(u32, 2);
+            const a: u32 = if (r.uintLessThan(u32, 8) == 0) 0 else 1;
+            out[0] = 0x0f00_0000 | q | (a << 23) | dbl | (l << 21) | (opc << 12) | (h << 11) | rr;
+        },
+        14 => { // edge integer vectors for SCVTF/UCVTF
+            out[0] = 0x5280_0000 | (pick(r, u32, &.{ 0, 1, 0xffff }) << 5) | x9;
+            out[1] = 0x72a0_0000 | (pick(r, u32, &.{ 0, 0x4000, 0x7fff, 0x8000, 0xffff }) << 5) | x9;
+            out[2] = 0x0e04_0c00 | q | (x9 << 5) | vd;
+            return 3;
+        },
+        else => { // mix dirty high half before Q = 0
+            out[0] = 0x4f01_e7e0 | vd; // movi vD.16b, #0x3f
+            return 1;
+        },
+    }
+    if (r.boolean()) {
+        out[1] = 0xd53b_4420 | kt.dst(r); // mrs xD, fpsr
+        out[2] = 0xd51b_4420 | 31; // msr fpsr, xzr
+        return 3;
+    }
+    return 1;
+}
+
 test "a64 jit vec: arithmetic" {
     try kt.kind(.generic, genArith, .{ .rounds = 300, .words = 48 });
     try kt.kind(.generic, genArith, .{ .seed = 2, .rounds = 300, .words = 48 });
+}
+test "a64 jit vec: AdvSIMD FP" {
+    try kt.kind(.generic, genFpVec, .{ .rounds = 300, .words = 48 });
+    try kt.kind(.generic, genFpVec, .{ .seed = 2, .rounds = 300, .words = 48 });
 }
 test "a64 jit vec: moves and permutes" {
     try kt.kind(.generic, genMove, .{ .rounds = 300, .words = 48 });

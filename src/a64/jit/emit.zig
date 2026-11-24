@@ -93,8 +93,8 @@ pub const Use = struct {
 
 /// Where an op is: its index k in block b (k instructions of b retired
 /// before it), its pc, and whether b is emitted as a self-loop (its
-/// terminator branches to b.pc and continues the module's `loop`; only for
-/// a block compiled on its own).
+/// terminator branches to b.pc and continues the module's `loop`, or in a
+/// region the member's own `loop`; a block compiled whole).
 pub const At = struct {
     k: usize,
     pc: u64,

@@ -100,7 +100,7 @@ export interface KwemuStats {
 	/**
 	 * kwemu.Stats as 64-bit words, in the layout of src/emu/kwemu.zig: 11
 	 * counters, op_hist[192], JIT insns, hand-backs, hb[192], hb_gen[40],
-	 * jx[64] (indices in src/emu/jitcore.zig Jx), gen_words[3 * 512] (A64:
+	 * jx[64] (indices in src/emu/jitcore.zig Jx), gen_words[3 * 256] (A64:
 	 * `generic` ops by word, kwemu.zig countGenWord).
 	 */
 	words: number[];
@@ -177,12 +177,12 @@ export function jitSimd(): boolean {
 }
 /** kw_host_jit_compile flags bit 0: f(x, 0, irqp, jl) returns 0 at once. */
 const WARM = 1;
-/** kwemu's emit buffer is 16 KiB; anything much larger is not from kwemu. */
+/** kwemu's emit buffer is 32 KiB; anything much larger is not from kwemu. */
 const MAX_MODULE = 1 << 20;
 /** Failure messages logged before going quiet. */
 const MAX_LOGGED = 5;
 /** Words in kwemu.Stats with -Dkwemu-stats (src/emu/kwemu.zig), and the offset of icount in struct kw_cpu. */
-const KWEMU_STATS_WORDS = 11 + 192 + 2 + 192 + 40 + 64 + 3 * 512;
+const KWEMU_STATS_WORDS = 11 + 192 + 2 + 192 + 40 + 64 + 3 * 256;
 const KW_CPU_ICOUNT = 32;
 /** Uncollected freed modules from which every compile and free prompts a collection. */
 const RETAINED_NUDGE = 256;
@@ -276,8 +276,8 @@ export class JitHost {
 		// counters are copied through this CPU's buffer, which is free
 		// while this host's JavaScript runs.
 		const cpu = this.#cpuOfBuf(BigInt(of));
-		// The emit buffer (16 KiB) is free between compiles: copy the
-		// counters (16296 bytes) into it, then read them.
+		// The emit buffer (32 KiB) is free between compiles: copy the
+		// counters (10152 bytes) into it, then read them.
 		this.#debugStats(cpu, BigInt(this.#buf));
 		const v = new DataView(this.#opts.memory().buffer);
 		const words: number[] = [];

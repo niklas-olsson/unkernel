@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+# kwvk-naga: SPIR-V -> WGSL for the Vulkan host renderer (js/core/vk-shader.ts).
+
+[package]
+name = "kwvk-naga"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# glsl-out only for naga::back::pipeline_constants (baking spec constants);
+# the GLSL writer itself is dead code that LTO drops.
+naga = { version = "=30.0.2", default-features = false, features = ["spv-in", "wgsl-out", "glsl-out"] }
+
+[features]
+# The native WGSL checker (examples/check.rs): naga's WGSL
+# front end, as Firefox parses the translator's output.
+check = ["naga/wgsl-in"]
+
+[[example]]
+name = "check"
+required-features = ["check"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

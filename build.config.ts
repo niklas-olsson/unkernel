@@ -18,6 +18,12 @@
 //                                 new URL("./virgl.mjs", import.meta.url) and imports it
 //                                 only for createKernel({ gl }); virgl.mjs finds virgl.wasm
 //                                 next to itself
+//   vendor/build/vk/kwvk-naga.wasm -> dist/kwvk-naga.wasm
+//                                 the guest Vulkan renderer's SPIR-V translator (vk/naga;
+//                                 UNKERNEL_VK=file takes another): the web entry finds it
+//                                 with new URL("./kwvk-naga.wasm", import.meta.url); optional
+//                                 (a warning without it, and createKernel({ vk }) fails at the
+//                                 guest's first Vulkan instance)
 //   js/node/worker-entry.ts       the kernel worker (createKernel({ worker: true })) on
 //   js/web/web-worker-entry.ts    Node and in browsers, each bundled into one minified ES
 //                                 module and inlined as a string where js/node/worker.ts
@@ -43,6 +49,7 @@ import { defineBuildConfig } from "obuild/config";
 const WASM = process.env.UNKERNEL_BUNDLE || "vendor/build/bundle/unkernel.wasm";
 const GL_DIR = process.env.UNKERNEL_GL || "vendor/build/gl-wasm";
 const GL_FILES = ["virgl.mjs", "virgl.wasm"];
+const VK_WASM = process.env.UNKERNEL_VK || "vendor/build/vk/kwvk-naga.wasm";
 
 /**
  * Worker entries and the module that starts each one with
@@ -202,6 +209,8 @@ export default defineBuildConfig({
 			const dist = path.join(ctx.pkgDir, "dist");
 			await copyFile(path.resolve(ctx.pkgDir, WASM), path.join(dist, "unkernel.wasm"));
 			for (const f of GL_FILES) await copyFile(path.resolve(ctx.pkgDir, GL_DIR, f), path.join(dist, f));
+			if ((await stat(path.resolve(ctx.pkgDir, VK_WASM)).catch(() => null))?.isFile()) await copyFile(path.resolve(ctx.pkgDir, VK_WASM), path.join(dist, "kwvk-naga.wasm"));
+			else console.warn(`unkernel: ${VK_WASM} is missing (vk/naga): dist/ has no Vulkan translator, createKernel({ vk }) fails at the guest's first Vulkan instance`);
 			// The files an entry loads (itself and its chunks) and its bare imports.
 			const reach = async (entry: string) => {
 				const files = new Map<string, string>(), bare: Array<[string, string]> = [];

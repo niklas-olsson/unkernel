@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Niklas Olsson
 import type { TerminalApp } from "../types.ts";
-import { chromiumCommand, chromiumRuntime } from "./chromium.ts";
+import { chromiumCommand, chromiumRuntime } from "../browsers/chromium.ts";
 
 export default {
 	id: "discord",

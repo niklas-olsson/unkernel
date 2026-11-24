@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// A barrier in non-uniform control flow: valid SPIR-V that Tint's uniformity
+// analysis refuses, so the pipeline cannot be made (as ~29 of ggml's).
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer B { uint v[]; } b;
+shared uint s[64];
+void main() {
+	uint i = gl_LocalInvocationID.x;
+	s[i] = b.v[i];
+	if (b.v[i] > 5u) barrier();
+	b.v[i] = s[63u - i];
+}

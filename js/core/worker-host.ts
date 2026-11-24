@@ -25,6 +25,7 @@ import { fetchOver } from "./http.ts";
 import { CommandTable, type HostCommand, type parseCommands } from "./commands.ts";
 import { MountTable, type FsSource, type Mount, type MountOptions, type parseMounts } from "./mounts.ts";
 import type { GlHost } from "./gl.ts";
+import type { VkHost } from "./vk.ts";
 import type { GpuRenderer } from "./gl-gpu.ts";
 import { FrameClient, RemoteEvdev, SoundBridge } from "./worker-devices.ts";
 import { SharedOwner, newSharedControl, sharedMemoryAvailable, type KernelTransport } from "./worker-shared.ts";
@@ -34,6 +35,7 @@ import type { ProfileReport } from "./profile.ts";
 import { moduleIsMemory64 } from "./kernel.ts";
 import { BootError, loadBytes, loadKernelModule, type BootFailStage, type KernelSource } from "./load.ts";
 import { ConsoleRing, ConsoleRingReader, newConsoleRing } from "./console-ring.ts";
+import { createSoundRing } from "./sound-ring.ts";
 import { ConsoleOutput, errorText } from "./output.ts";
 import { SHARED_SNAPSHOT_BYTES, SnapshotCommitError, newSnapshotMemory, receivedSnapshot, restoreSnapshotMemory, sentSnapshot, snapshotTransfer, type KernelSnapshot, type SnapshotOptions } from "./snapshot.ts";
 import type { FromWorker, ToWorker, WorkerBootSpec, WorkerEndpoint, WorkerExit, WorkerSource } from "./worker-protocol.ts";
@@ -151,6 +153,8 @@ export interface WorkerKernelOptions {
 	shared?: SharedArrayBuffer;
 	/** The console ring (console-ring.ts), also sent in the boot spec: read here. */
 	console?: SharedArrayBuffer;
+	/** The sound ring (sound-ring.ts), also sent in the boot spec: read here or by sink.onRing. */
+	soundRing?: SharedArrayBuffer;
 	/** virtio-gpu 3D: the renderer side here (gl-gpu.ts), serving the worker's "gpu" requests. */
 	gpu?: GpuRenderer;
 }
@@ -214,6 +218,7 @@ export class WorkerKernel implements KernelHandle {
 	#mounts: MountTable;
 	#commands: CommandTable;
 	#gl: GlHost | undefined;
+	#vk: VkHost | undefined;
 	#gpu: GpuRenderer | undefined;
 	#shm: ShmClient | undefined;
 	#shmCalls = new Map<number, { resolve: (v: ShmCallResult) => void; reject: (e: Error) => void }>();
@@ -264,7 +269,7 @@ export class WorkerKernel implements KernelHandle {
 		const sound = opts.sound;
 		if (sound) {
 			this.#soundState = { open: false, playing: false, format: null };
-			if (typeof sound === "object") this.#sound = new SoundBridge(sound, post, opts.log);
+			if (typeof sound === "object") this.#sound = new SoundBridge(sound, post, opts.log, opts.soundRing);
 		}
 		if (opts.vsock) {
 			// Packets for the guest, per burst: through the shared transport's
@@ -364,6 +369,7 @@ export class WorkerKernel implements KernelHandle {
 			this.#disks = m.disks;
 			this.#skipped = m.skipped;
 			this.#isStarted = true;
+			this.#sound?.startRing();
 			this.#resolveStarted();
 			break;
 		case "boot-error":
@@ -409,10 +415,13 @@ export class WorkerKernel implements KernelHandle {
 			break;
 		case "sound-state":
 			this.#soundState = m.state;
-			this.#sound?.onState(m.state, m.event);
+			this.#sound?.onState(m.state, m.event, m.n);
 			break;
 		case "sound-chunk":
 			this.#sound?.onChunk(m.seq, m.format, m.data);
+			break;
+		case "sound-wake":
+			this.#sound?.onWake();
 			break;
 		case "vsock":
 			if (this.#vsock) for (const p of m.packets) this.#vsock.receive(p);
@@ -535,6 +544,7 @@ export class WorkerKernel implements KernelHandle {
 		this.#shmInPlace?.close();
 		this.#shmLocal = undefined;
 		this.#gl?.shutdown();
+		this.#vk?.shutdown();
 		this.#commands.shutdown();
 		this.#mounts.shutdown();
 		this.#vsock?.shutdown();
@@ -784,6 +794,17 @@ export class WorkerKernel implements KernelHandle {
 		return this.#gl;
 	}
 
+	/** @internal createKernel's `vk`, once the kernel runs: served on this thread, as vsock is. */
+	attachVk(vk: VkHost | undefined): void {
+		this.#vk = vk;
+		if (vk && this.#result) vk.shutdown();
+	}
+
+	/** With the vk option: the Vulkan renderer's host side (vk.ts), on this thread as inline. */
+	get vk(): VkHost | undefined {
+		return this.#vk;
+	}
+
 	/**
 	 * With the shm option: open(), create() and openId() as inline. Each call
 	 * is a round trip to the worker, which runs it when the kernel next
@@ -962,10 +983,13 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 	const shared = canShare ? newSharedControl() : undefined;
 	// More than one CPU: their console output comes here through a shared ring (unused if the kernel gets one CPU).
 	const consoleRing = shared && (opts.cpus ?? 1) > 1 ? newConsoleRing() : undefined;
+	const soundObj = typeof opts.sound === "object" ? opts.sound : undefined;
+	const soundRing = shared && soundObj && (soundObj.onChunk || soundObj.onRing) ? createSoundRing() : undefined;
+	if (soundObj?.onRing && !soundObj.onChunk && !soundRing) log("[sound] onRing needs shared memory, and the sink has no onChunk: no PCM is delivered");
 	const endpoint = platform.spawnWorker!();
 	const vm = new WorkerKernel(endpoint, {
 		onOutput: opts.onOutput, onProgress: progress, log, onDiskError: opts.onDiskError,
-		display: opts.display ?? (opts.gpu ? true : undefined), onDisplay: opts.onDisplay, onInput: opts.onInput, sound: opts.sound, vsock: opts.vsock ?? true, shm: opts.shm, shared,
+		display: opts.display ?? (opts.gpu ? true : undefined), onDisplay: opts.onDisplay, onInput: opts.onInput, sound: opts.sound, soundRing, vsock: opts.vsock ?? true, shm: opts.shm, shared,
 		console: consoleRing, gpu,
 	});
 	let spec: WorkerBootSpec, transfer: ArrayBuffer[];
@@ -1000,7 +1024,7 @@ export async function createKernelInWorker(platform: Platform, opts: CreateKerne
 			statsIntervalMs: STATS_INTERVAL_MS,
 			compileMs,
 			display: vm.bootDisplay,
-			sound: opts.sound ? { rate: typeof opts.sound === "object" ? opts.sound.rate : undefined, chunks: typeof opts.sound === "object" && !!opts.sound.onChunk } : false,
+			sound: opts.sound ? { rate: soundObj?.rate, chunks: Boolean(soundObj?.onChunk && !(soundRing && soundObj?.onRing)), ...(soundRing && { ring: soundRing }) } : false,
 			vsock: !!(opts.vsock ?? true),
 			shm: !!opts.shm,
 			gpu: gpu ? "virgl" : !!opts.gpu,

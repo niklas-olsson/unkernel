@@ -221,8 +221,8 @@ importers:
         specifier: ^8.3.8
         version: 8.3.8(@types/node@24.19.2)(jiti@2.7.0)
       wland:
-        specifier: 0.1.0-261122-6617578
-        version: 0.1.0-261122-6617578
+        specifier: 0.1.0-261124-3c987e5
+        version: 0.1.0-261124-3c987e5
 
 packages:
 
@@ -1142,8 +1142,8 @@ packages:
       yaml:
         optional: true
 
-  wland@0.1.0-261122-6617578:
-    resolution: {integrity: sha512-8gqEmhbl+vcW/zqtXhPh9rr1xxWpoFKkNnSb6avA58aYJTUGHfFk9khuhT98vQpwaWbaslcIHmvxwDAhtHTxQQ==}
+  wland@0.1.0-261124-3c987e5:
+    resolution: {integrity: sha512-Nh/LPs0VPi1WPj2pw4gWXyc8gfd7DdTicNv1Maf8tTjv3c0inpxW3RW1JvxWaJCqwDlr6nxVTJXojT8avAjjyA==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -1820,7 +1820,7 @@ snapshots:
       fsevents: 2.3.3
       jiti: 2.7.0
 
-  wland@0.1.0-261122-6617578: {}
+  wland@0.1.0-261124-3c987e5: {}
 
   yuku-ast@0.19.0:
     dependencies:

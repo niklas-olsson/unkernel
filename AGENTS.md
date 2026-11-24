@@ -6,7 +6,7 @@ Linux ELF (ARMv8.0-A with FP, AdvSIMD and the crypto, CRC32 and LSE
 extensions; a64/isa.md), run by kwemu, a software CPU in Zig linked
 into the kernel: the AArch64 front end (src/a64: a reference interpreter, a
 decoded-op tier and a wasm JIT) on an ISA-neutral MMU, block cache and JIT
-core (src/emu). Its contract with the kernel is `include/kw_emu.h` (ABI 3).
+core (src/emu). Its contract with the kernel is `include/kw_emu.h` (ABI 4).
 The kernel bundle (`unkernel.wasm`) carries a small base initramfs that
 boots a distro image (Alpine or Debian, read-only erofs, attached as a disk)
 under an overlay root, or the base shell without one. README.md is the overview,
@@ -27,6 +27,7 @@ programs).
 | [.agents/toolchain.md](.agents/toolchain.md) | patched wasm-ld, Binaryen, Zig 0.16, host tools, pinned downloads |
 | [.agents/testing.md](.agents/testing.md) | quick checks per area, CLI exit codes, the full matrix, release CI |
 | [.agents/gl.md](.agents/gl.md) | guest GL through virgl on WebGL2 (branch `webgl`): plan, measurements, headless tests |
+| [.agents/vk.md](.agents/vk.md) | guest Vulkan on WebGPU (kwvk): the ICD, the host renderer, the SPIR-V translator, the relay and headless tests |
 | [.agents/status.md](.agents/status.md) | roadmap and open issues; read only for planning, or when asked |
 
 ## Building and testing

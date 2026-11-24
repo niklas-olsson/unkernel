@@ -1,4 +1,4 @@
-From c1b029ac821e1e733a6db251e3d6ca03c21beebd Mon Sep 17 00:00:00 2001
+From 44885b0596c2ae4d63699bd02b16f3e0d84b6502 Mon Sep 17 00:00:00 2001
 From: Pooya Parsa <pooya@pi0.io>
 Date: Sun, 15 Nov 2026 10:16:10 +0000
 Subject: [PATCH] wasm: add kw_defconfig
@@ -34,9 +34,11 @@ CGROUP_PIDS, USER_NS, CHECKPOINT_RESTORE, PSI, TASKSTATS with
 TASK_XACCT and TASK_IO_ACCOUNTING, USERFAULTFD, IP_MULTICAST, UNIX_DIAG,
 PACKET_DIAG, NETLINK_DIAG, BLK_DEV_LOOP (MIN_COUNT=0: 8 loop devices up
 front cost 760 KiB of RAM), TUN and MAGIC_SYSRQ.
+SECCOMP with SECCOMP_FILTER, for sandboxes (bubblewrap, browsers), adds
+12 KB.
 
 Off on purpose: BPF_SYSCALL and KEYS (systemd copes with ENOSYS),
-SECCOMP and RSEQ (need arch support), IPV6, and COREDUMP (the ELF core
+RSEQ (needs arch support), IPV6, and COREDUMP (the ELF core
 writer needs elf_core_copy_task_fpregs, which arch/wasm lacks, so a
 fault with a core limit would be a wasm trap).
 
@@ -52,16 +54,16 @@ calls. Built with FRAME_WARN=1024, no other function warns.
 
 Signed-off-by: Pooya Parsa <pooya@pi0.io>
 ---
- arch/wasm/configs/kw_defconfig | 183 +++++++++++++++++++++++++++++++++
- 1 file changed, 183 insertions(+)
+ arch/wasm/configs/kw_defconfig | 186 +++++++++++++++++++++++++++++++++
+ 1 file changed, 186 insertions(+)
  create mode 100644 arch/wasm/configs/kw_defconfig
 
 diff --git a/arch/wasm/configs/kw_defconfig b/arch/wasm/configs/kw_defconfig
 new file mode 100644
-index 00000000000..d7271ffe7ac
+index 00000000000..eb90662a5f9
 --- /dev/null
 +++ b/arch/wasm/configs/kw_defconfig
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,186 @@
 +# unkernel: wasm64 kernel, emulated riscv64 user mode (kwemu)
 +# CONFIG_LOCALVERSION_AUTO is not set
 +CONFIG_DEFAULT_HOSTNAME="unkernel"
@@ -105,7 +107,8 @@ index 00000000000..d7271ffe7ac
 +# CONFIG_SWAP is not set
 +# CONFIG_COMPAT_BRK is not set
 +# CONFIG_MODULES is not set
-+# CONFIG_SECCOMP is not set
++CONFIG_SECCOMP=y
++CONFIG_SECCOMP_FILTER=y
 +CONFIG_BINFMT_ELF=y
 +CONFIG_BINFMT_SCRIPT=y
 +CONFIG_BINFMT_MISC=y
@@ -168,6 +171,8 @@ index 00000000000..d7271ffe7ac
 +CONFIG_FB_KWFB=y
 +# kwshm: the host reads and writes shmem files in place, /dev/kwshm
 +CONFIG_KWSHM=y
++# /dev/udmabuf: dma-bufs from memfds (lavapipe exports its images so)
++CONFIG_UDMABUF=y
 +# kwsnd: ALSA playback when the host has audio, plus OSS /dev/dsp for SDL 1.2
 +CONFIG_SOUND=y
 +CONFIG_SND=y

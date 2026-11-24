@@ -1,4 +1,4 @@
-From 3fb67ddf5ef5473150ae68f1c94b6b7738028748 Mon Sep 17 00:00:00 2001
+From 79e481ce724f19475cd5f2f01cc76ac40a0f466d Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 16 Nov 2026 14:54:54 +0000
 Subject: [PATCH] wasm: make atomic_read and atomic_set plain accesses

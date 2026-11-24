@@ -134,7 +134,8 @@ tokens and the sound work with it too. Console and evdev input and frames go
 through shared memory (read by the worker while the kernel runs);
 --worker=messages sends them as messages instead (handled when the kernel
 yields, up to 20 ms while the guest is busy), --worker=shared insists on
-shared memory. PCM and everything else are messages either way.
+shared memory. PCM goes through shared memory too unless --worker=messages;
+everything else is messages either way.
 
 --cpus N gives an SMP kernel (one built with CONFIG_SMP: kw_smp.config)
 N CPUs, each another instance of the kernel in its own thread on a shared

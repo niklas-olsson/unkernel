@@ -4,16 +4,18 @@
 # Release: build everything from source (patched wasm-ld, the UP and SMP
 # kernels, the data disk template, the base bundle unkernel.wasm with its
 # SMP patch, the distro images alpine.erofs and debian.erofs and their
-# index distros.json) and the guest GL renderer (gl/wasm, virgl.wasm),
-# smoke-test it, build and pack the npm package (the base bundle and the
-# GL renderer, no distro image), and for a release publish it to npm
+# index distros.json), the guest GL renderer (gl/wasm, virgl.wasm) and
+# the guest Vulkan renderer's translator (vk/naga, kwvk-naga.wasm),
+# smoke-test it, build and pack the npm package (the base bundle, the
+# GL renderer and the translator, no distro image), and for a release publish it to npm
 # (trusted publishing, with provenance) and publish a GitHub release (a
 # normal one, marked latest, its notes a compare link from the previous
 # v* tag) with the npm tarball, unkernel.wasm, distros.json, the images
-# it names and the GL renderer (virgl.mjs, virgl.wasm) attached. The SDK's
-# fetchDistro() and the page's build (web/scripts/kernel.ts) download those
-# assets by the tag v<version>, the version stamped into package.json (the
-# page takes the GL renderer for its GL option).
+# it names, the GL renderer (virgl.mjs, virgl.wasm) and the Vulkan
+# translator (kwvk-naga.wasm) attached. The SDK's fetchDistro() and the
+# page's build (web/scripts/kernel.ts) download those assets by the tag
+# v<version>, the version stamped into package.json (the page takes the GL
+# renderer for its GL option and the translator for its Vulkan option).
 #
 # Runs:
 #   - by hand from main (Actions > Release > Run workflow): a release with
@@ -203,7 +205,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/downloads
-          key: downloads-${{ hashFiles('kernel/tools/env.sh', 'kernel/build.sh', 'guest/**/pins.sh', 'gl/wasm/pins.sh') }}
+          key: downloads-${{ hashFiles('kernel/tools/env.sh', 'kernel/build.sh', 'guest/**/pins.sh', 'gl/wasm/pins.sh', 'vk/pins.sh') }}
           restore-keys: downloads-
 
       # Exact key only: build.sh never re-applies the series on an existing
@@ -320,6 +322,17 @@ jobs:
           gl/wasm/build.sh
           ls -l vendor/build/gl-wasm/virgl.mjs vendor/build/gl-wasm/virgl.wasm
 
+      # The guest Vulkan renderer's SPIR-V to WGSL translator the package
+      # carries (dist/kwvk-naga.wasm): naga for wasm32, its crates pinned by
+      # vk/naga/Cargo.lock (the runner's rustup). The base above carries the
+      # ICD (vk/build.sh icd: zig and the Vulkan headers pinned in vk/pins.sh,
+      # which go into the downloads cache).
+      - name: Build the Vulkan translator
+        run: |
+          rustup target add wasm32-unknown-unknown
+          vk/build.sh naga
+          ls -l vendor/build/vk/kwvk-naga.wasm
+
       - name: Save downloads
         if: steps.downloads.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -384,6 +397,7 @@ jobs:
           ls -l dist/*.wasm
           cmp dist/unkernel.wasm vendor/build/bundle/unkernel.wasm
           cmp dist/virgl.wasm vendor/build/gl-wasm/virgl.wasm
+          cmp dist/kwvk-naga.wasm vendor/build/vk/kwvk-naga.wasm
       # The api suite (~85 s) runs once, on the built package: the same code
       # as the sources, plus the packaging (its distro tests read
       # vendor/build/distro/alpine.erofs).
@@ -396,8 +410,9 @@ jobs:
       # The release's assets: the npm tarball (the base bundle and no distro
       # image: the SDK downloads those by the tag), unkernel.wasm, distros.json,
       # the images it names (not the .ext4, .tar or .id files next to them) and
-      # the GL renderer for the page (virgl.mjs, virgl.wasm), and the
-      # third-party notices those carry (THIRD-PARTY.md).
+      # the GL renderer for the page (virgl.mjs, virgl.wasm), the Vulkan
+      # translator for the page (kwvk-naga.wasm), and the third-party notices
+      # those carry (THIRD-PARTY.md).
       - name: Pack
         run: |
           mkdir -p out
@@ -413,7 +428,7 @@ jobs:
             echo "::error::the npm package is $size bytes (more than 20 MB)"
             exit 1
           fi
-          cp vendor/build/bundle/unkernel.wasm vendor/build/distro/distros.json vendor/build/gl-wasm/virgl.mjs vendor/build/gl-wasm/virgl.wasm THIRD-PARTY.md out/
+          cp vendor/build/bundle/unkernel.wasm vendor/build/distro/distros.json vendor/build/gl-wasm/virgl.mjs vendor/build/gl-wasm/virgl.wasm vendor/build/vk/kwvk-naga.wasm THIRD-PARTY.md out/
           for f in $(node -p 'JSON.parse(require("node:fs").readFileSync("vendor/build/distro/distros.json", "utf8")).distros.map((d) => d.file).join(" ")'); do
             cp "vendor/build/distro/$f" out/
           done

@@ -1,0 +1,436 @@
+From d2806628f8b8ccbb62161e2d49add14a730fd707 Mon Sep 17 00:00:00 2001
+From: kernel-wasm <kernel-wasm@localhost>
+Date: Mon, 23 Nov 2026 22:47:49 +0000
+Subject: [PATCH] wasm: ptrace register sets in arm64's layouts
+
+ptrace had no regsets, and without HAVE_ARCH_TRACEHOOK PTRACE_GETREGSET,
+PTRACE_SETREGSET and PTRACE_GET_SYSCALL_INFO all failed with EIO. gdb
+gave up ("Unable to fetch general registers"), and strace hung: it took
+the error at the first syscall stop for a tracee that had died, and
+waited for an exit that never came, the tracee still stopped.
+
+Select HAVE_ARCH_TRACEHOOK and give the aarch64 view arm64's regsets,
+read from and written to the task's struct kw_regs in pt_regs:
+
+- NT_PRSTATUS (struct user_pt_regs): x0..x30, sp, pc and pstate made
+  from NZCV. A write is refused as on arm64 unless the mode is EL0t in
+  AArch64 with D, A, I and F clear; of the other bits only NZCV is kept.
+- NT_PRFPREG (struct user_fpsimd_state): V0..V31, FPSR, FPCR; a write
+  keeps the FPSR and FPCR bits kwemu has, as signal return does.
+- NT_ARM_TLS: TPIDR_EL0, and a TPIDR2_EL0 of 0 as on arm64 without SME.
+- NT_ARM_SYSTEM_CALL: the syscall in progress.
+
+The syscall number now lives apart from x8, as arm64's pt_regs
+syscallno: syscall_get_nr() returns it during a syscall and NO_SYSCALL
+otherwise, and a tracer changes or skips (-1) a syscall through
+NT_ARM_SYSTEM_CALL, not x8. Like arm64's el0_svc_common(), entry takes
+the low 32 bits of x8, keeps the first argument in x0 for the tracer's
+entry stop (only a user's syscall(-1) presets -ENOSYS), and leaves x0 as
+a tracer set it when it skips the syscall. A tracer's write of x0 at an
+entry or seccomp stop also updates orig_x0, the first argument the
+syscall runs with.
+---
+ arch/wasm/Kconfig               |   2 +
+ arch/wasm/configs/kw_defconfig  |   4 +-
+ arch/wasm/include/asm/ptrace.h  |   8 ++
+ arch/wasm/include/asm/syscall.h |  10 +-
+ arch/wasm/kernel/ptrace.c       | 231 +++++++++++++++++++++++++++++++-
+ arch/wasm/kernel/signal.c       |   4 -
+ arch/wasm/kernel/traps.c        |  23 +++-
+ 7 files changed, 261 insertions(+), 21 deletions(-)
+
+diff --git a/arch/wasm/Kconfig b/arch/wasm/Kconfig
+index b8754207352..ec1eda88f04 100644
+--- a/arch/wasm/Kconfig
++++ b/arch/wasm/Kconfig
+@@ -21,6 +21,8 @@ config WASM
+ 	select CLONE_BACKWARDS
+ 	# seccomp filters see AUDIT_ARCH_AARCH64 and arm64's syscall numbers.
+ 	select HAVE_ARCH_SECCOMP_FILTER
++	# ptrace's regsets (arm64's), PTRACE_GET_SYSCALL_INFO, /proc/PID/syscall
++	select HAVE_ARCH_TRACEHOOK
+ 	select HAVE_VIRT_CPU_ACCOUNTING_GEN
+ 	select HAVE_CONTEXT_TRACKING_USER
+ 
+diff --git a/arch/wasm/configs/kw_defconfig b/arch/wasm/configs/kw_defconfig
+index 724d19cc3d0..97272fe582c 100644
+--- a/arch/wasm/configs/kw_defconfig
++++ b/arch/wasm/configs/kw_defconfig
+@@ -18,8 +18,8 @@ CONFIG_PSI=y
+ CONFIG_TASKSTATS=y
+ CONFIG_TASK_XACCT=y
+ CONFIG_TASK_IO_ACCOUNTING=y
+-# /proc/PID/mem writable without being a ptracer (ptrace has no regsets):
+-# programs that patch their own code through /proc/self/mem
++# /proc/PID/mem writable without being a ptracer: programs that patch
++# their own code through /proc/self/mem
+ CONFIG_PROC_MEM_ALWAYS_FORCE=y
+ # time namespaces (unshare -T); the offsets apply in the syscalls (no vDSO)
+ CONFIG_TIME_NS=y
+diff --git a/arch/wasm/include/asm/ptrace.h b/arch/wasm/include/asm/ptrace.h
+index c0093dcba37..ff8ee713b80 100644
+--- a/arch/wasm/include/asm/ptrace.h
++++ b/arch/wasm/include/asm/ptrace.h
+@@ -18,6 +18,7 @@ struct pt_regs {
+ 	struct kw_regs user;	/* x0..x30, sp, pc, nzcv, fpcr, fpsr, tpidr_el0, v0..v31 */
+ 	unsigned long orig_x0;
+ 	unsigned long cause;	/* PT_CAUSE_* */
++	long syscallno;		/* the syscall being run, if cause is SYSCALL */
+ 	unsigned long badaddr;
+ 	unsigned long kernel;	/* non-zero: frame interrupted kernel code */
+ 	unsigned long irqflags;	/* irq state at entry (kernel frames) */
+@@ -26,6 +27,13 @@ struct pt_regs {
+ #define PT_CAUSE_NONE		(-1UL)
+ #define PT_CAUSE_SYSCALL	0x15UL	/* like arm64 ESR_ELx_EC_SVC64 */
+ 
++/* syscall_get_nr() outside a syscall; also the syscall a tracer skips. */
++#define NO_SYSCALL		(-1)
++
++/* The FPCR and FPSR bits kwemu keeps (src/a64/common.zig, FPCR_MASK, FPSR_MASK). */
++#define KW_FPCR_MASK	((1U << 26) | (1U << 25) | (1U << 24) | (3U << 22) | (1U << 19))
++#define KW_FPSR_MASK	((1U << 27) | (1U << 7) | 0x1fU)
++
+ #define user_mode(regs)			(!(regs)->kernel)
+ #define instruction_pointer(regs)	((regs)->user.pc)
+ #define user_stack_pointer(regs)	((regs)->user.sp)
+diff --git a/arch/wasm/include/asm/syscall.h b/arch/wasm/include/asm/syscall.h
+index 597055ad55f..4c3e07741ff 100644
+--- a/arch/wasm/include/asm/syscall.h
++++ b/arch/wasm/include/asm/syscall.h
+@@ -8,20 +8,24 @@
+ #include <linux/err.h>
+ #include <asm/ptrace.h>
+ 
+-/* arm64 syscall convention: x8 = nr, x0..x5 = args, x0 = return. */
++/*
++ * arm64 syscall convention: x8 = nr, x0..x5 = args, x0 = return. As on
++ * arm64 the number in progress is kept apart from x8 (pt_regs syscallno,
++ * NT_ARM_SYSTEM_CALL), and the first argument in orig_x0.
++ */
+ 
+ typedef long (*syscall_t)(const struct pt_regs *);
+ extern void * const sys_call_table[];
+ 
+ static inline int syscall_get_nr(struct task_struct *task, struct pt_regs *regs)
+ {
+-	return regs->user.x[8];
++	return regs->cause == PT_CAUSE_SYSCALL ? regs->syscallno : NO_SYSCALL;
+ }
+ 
+ static inline void syscall_set_nr(struct task_struct *task,
+ 				  struct pt_regs *regs, int sysno)
+ {
+-	regs->user.x[8] = sysno;
++	regs->syscallno = sysno;
+ }
+ 
+ static inline void syscall_rollback(struct task_struct *task,
+diff --git a/arch/wasm/kernel/ptrace.c b/arch/wasm/kernel/ptrace.c
+index 2e3a46c4655..9cb1174039d 100644
+--- a/arch/wasm/kernel/ptrace.c
++++ b/arch/wasm/kernel/ptrace.c
+@@ -1,21 +1,238 @@
+-/* SPDX-License-Identifier: GPL-2.0-only */
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * ptrace and core dump register sets in arm64's layouts (based on
++ * arch/arm64/kernel/ptrace.c): NT_PRSTATUS (struct user_pt_regs),
++ * NT_PRFPREG (struct user_fpsimd_state), NT_ARM_TLS and
++ * NT_ARM_SYSTEM_CALL. They read and write the task's struct kw_regs in
++ * pt_regs, which holds its whole user context whenever it is stopped.
++ * There is no SVE, SME, PAC, MTE, GCS, POE or FPMR state, and no hardware
++ * breakpoints or watchpoints (NT_ARM_HW_BREAK, NT_ARM_HW_WATCH).
++ */
+ 
++#include <linux/elf.h>
+ #include <linux/ptrace.h>
+ #include <linux/regset.h>
+-#include <linux/elf.h>
+ #include <linux/sched/task_stack.h>
++#include <asm/syscall.h>
+ 
+-/* No regsets yet: PTRACE_GETREGSET etc. fail with -EIO. */
+-static const struct user_regset_view wasm_user_view = {
++#define PSR_NZCV	(PSR_N_BIT | PSR_Z_BIT | PSR_C_BIT | PSR_V_BIT)
++
++static int gpr_get(struct task_struct *target,
++		   const struct user_regset *regset, struct membuf to)
++{
++	struct pt_regs *regs = task_pt_regs(target);
++
++	/* x0..x30, sp and pc are laid out as in struct user_pt_regs. */
++	membuf_write(&to, regs->user.x, sizeof(regs->user.x));
++	membuf_store(&to, (u64)regs->user.sp);
++	membuf_store(&to, (u64)regs->user.pc);
++	return membuf_store(&to, (u64)regs->user.nzcv);
++}
++
++/*
++ * As arm64: a tracer that changes x0 at a syscall-entry or seccomp stop
++ * changes the first argument the syscall runs with (the wrappers and
++ * syscall_get_arguments() read orig_x0); at a syscall-exit stop x0 is the
++ * result, and outside a syscall orig_x0 is only for restarting.
++ */
++static void update_syscall_orig_x0_after_ptrace(struct task_struct *target)
++{
++	struct pt_regs *regs = task_pt_regs(target);
++	struct kernel_siginfo *info = target->last_siginfo;
++
++	if (syscall_get_nr(target, regs) == NO_SYSCALL)
++		return;
++	if (WARN_ON_ONCE(!info))
++		return;
++	if ((info->si_code & ~0x80) == SIGTRAP &&
++	    target->ptrace_message == PTRACE_EVENTMSG_SYSCALL_EXIT)
++		return;
++	regs->orig_x0 = regs->user.x[0];
++}
++
++static int gpr_set(struct task_struct *target,
++		   const struct user_regset *regset, unsigned int pos,
++		   unsigned int count, const void *kbuf,
++		   const void __user *ubuf)
++{
++	struct pt_regs *regs = task_pt_regs(target);
++	struct user_pt_regs newregs;
++	int ret;
++
++	memcpy(newregs.regs, regs->user.x, sizeof(newregs.regs));
++	newregs.sp = regs->user.sp;
++	newregs.pc = regs->user.pc;
++	newregs.pstate = regs->user.nzcv;
++
++	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &newregs, 0, -1);
++	if (ret)
++		return ret;
++
++	/*
++	 * As arm64's valid_native_regs(): EL0t, AArch64, D, A, I and F
++	 * clear, or -EINVAL. Of the rest only NZCV exists here (kwemu keeps
++	 * no SSBS, BTYPE, DIT, TCO, PAN or UAO), so the other bits read back
++	 * as zero.
++	 */
++	if (newregs.pstate & (PSR_MODE_MASK | PSR_MODE32_BIT | PSR_D_BIT |
++			      PSR_A_BIT | PSR_I_BIT | PSR_F_BIT))
++		return -EINVAL;
++
++	memcpy(regs->user.x, newregs.regs, sizeof(newregs.regs));
++	regs->user.sp = newregs.sp;
++	regs->user.pc = newregs.pc;
++	regs->user.nzcv = newregs.pstate & PSR_NZCV;
++
++	update_syscall_orig_x0_after_ptrace(target);
++	return 0;
++}
++
++static int fpr_get(struct task_struct *target,
++		   const struct user_regset *regset, struct membuf to)
++{
++	struct pt_regs *regs = task_pt_regs(target);
++
++	membuf_write(&to, regs->user.v, sizeof(regs->user.v));
++	membuf_store(&to, regs->user.fpsr);
++	membuf_store(&to, regs->user.fpcr);
++	return membuf_zero(&to, 2 * sizeof(u32));
++}
++
++static int fpr_set(struct task_struct *target,
++		   const struct user_regset *regset, unsigned int pos,
++		   unsigned int count, const void *kbuf,
++		   const void __user *ubuf)
++{
++	struct pt_regs *regs = task_pt_regs(target);
++	struct user_fpsimd_state newstate = { };
++	int ret;
++
++	memcpy(newstate.vregs, regs->user.v, sizeof(newstate.vregs));
++	newstate.fpsr = regs->user.fpsr;
++	newstate.fpcr = regs->user.fpcr;
++
++	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &newstate, 0,
++				 sizeof(newstate));
++	if (ret)
++		return ret;
++
++	memcpy(regs->user.v, newstate.vregs, sizeof(newstate.vregs));
++	/* The bits kwemu keeps, as MSR FPSR and MSR FPCR would leave them. */
++	regs->user.fpsr = newstate.fpsr & KW_FPSR_MASK;
++	regs->user.fpcr = newstate.fpcr & KW_FPCR_MASK;
++	return 0;
++}
++
++/* TPIDR_EL0, and TPIDR2_EL0 as arm64 without SME has it: 0, writes ignored. */
++static int tls_get(struct task_struct *target,
++		   const struct user_regset *regset, struct membuf to)
++{
++	membuf_store(&to, (u64)task_pt_regs(target)->user.tpidr_el0);
++	return membuf_zero(&to, sizeof(u64));
++}
++
++static int tls_set(struct task_struct *target,
++		   const struct user_regset *regset, unsigned int pos,
++		   unsigned int count, const void *kbuf,
++		   const void __user *ubuf)
++{
++	u64 tls[2] = { task_pt_regs(target)->user.tpidr_el0, 0 };
++	int ret;
++
++	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, tls, 0,
++				 sizeof(tls));
++	if (ret)
++		return ret;
++
++	task_pt_regs(target)->user.tpidr_el0 = tls[0];
++	return 0;
++}
++
++/*
++ * The number of the syscall in progress, NO_SYSCALL outside one. Setting it
++ * at a syscall-entry stop runs another syscall (-1 skips it, and x0 is the
++ * result); x8 in NT_PRSTATUS does not change it, as on arm64.
++ */
++static int system_call_get(struct task_struct *target,
++			   const struct user_regset *regset,
++			   struct membuf to)
++{
++	int nr = syscall_get_nr(target, task_pt_regs(target));
++
++	return membuf_store(&to, nr);
++}
++
++static int system_call_set(struct task_struct *target,
++			   const struct user_regset *regset,
++			   unsigned int pos, unsigned int count,
++			   const void *kbuf, const void __user *ubuf)
++{
++	struct pt_regs *regs = task_pt_regs(target);
++	int nr = syscall_get_nr(target, regs);
++	int ret;
++
++	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &nr, 0, -1);
++	if (ret)
++		return ret;
++
++	regs->syscallno = nr;
++	update_syscall_orig_x0_after_ptrace(target);
++	return 0;
++}
++
++enum aarch64_regset {
++	REGSET_GPR,
++	REGSET_FPR,
++	REGSET_TLS,
++	REGSET_SYSTEM_CALL,
++};
++
++static const struct user_regset aarch64_regsets[] = {
++	[REGSET_GPR] = {
++		USER_REGSET_NOTE_TYPE(PRSTATUS),
++		.n = sizeof(struct user_pt_regs) / sizeof(u64),
++		.size = sizeof(u64),
++		.align = sizeof(u64),
++		.regset_get = gpr_get,
++		.set = gpr_set,
++	},
++	[REGSET_FPR] = {
++		USER_REGSET_NOTE_TYPE(PRFPREG),
++		/* 32-bit units: FPSR and FPCR are 32 bits wide. */
++		.n = sizeof(struct user_fpsimd_state) / sizeof(u32),
++		.size = sizeof(u32),
++		.align = sizeof(u32),
++		.regset_get = fpr_get,
++		.set = fpr_set,
++	},
++	[REGSET_TLS] = {
++		USER_REGSET_NOTE_TYPE(ARM_TLS),
++		.n = 2,
++		.size = sizeof(u64),
++		.align = sizeof(u64),
++		.regset_get = tls_get,
++		.set = tls_set,
++	},
++	[REGSET_SYSTEM_CALL] = {
++		USER_REGSET_NOTE_TYPE(ARM_SYSTEM_CALL),
++		.n = 1,
++		.size = sizeof(int),
++		.align = sizeof(int),
++		.regset_get = system_call_get,
++		.set = system_call_set,
++	},
++};
++
++static const struct user_regset_view user_aarch64_view = {
+ 	.name = "aarch64",
+ 	.e_machine = EM_AARCH64,
+-	.regsets = NULL,
+-	.n = 0,
++	.regsets = aarch64_regsets,
++	.n = ARRAY_SIZE(aarch64_regsets),
+ };
+ 
+ const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+ {
+-	return &wasm_user_view;
++	return &user_aarch64_view;
+ }
+ 
+ void ptrace_disable(struct task_struct *child)
+diff --git a/arch/wasm/kernel/signal.c b/arch/wasm/kernel/signal.c
+index 216fc53ef94..a794a3227b2 100644
+--- a/arch/wasm/kernel/signal.c
++++ b/arch/wasm/kernel/signal.c
+@@ -39,10 +39,6 @@ struct frame_record {
+ 	u64 lr;
+ };
+ 
+-/* The FPCR and FPSR bits kwemu keeps (src/a64/common.zig, FPCR_MASK, FPSR_MASK). */
+-#define KW_FPCR_MASK	((1U << 26) | (1U << 25) | (1U << 24) | (3U << 22) | (1U << 19))
+-#define KW_FPSR_MASK	((1U << 27) | (1U << 7) | 0x1fU)
+-
+ /* Records in uc.uc_mcontext.__reserved[]: FPSIMD at 0, then the terminator. */
+ #define KW_SIG_END_OFFSET	round_up(sizeof(struct fpsimd_context), 16)
+ 
+diff --git a/arch/wasm/kernel/traps.c b/arch/wasm/kernel/traps.c
+index 0d16828b786..8663c7c492d 100644
+--- a/arch/wasm/kernel/traps.c
++++ b/arch/wasm/kernel/traps.c
+@@ -55,18 +55,31 @@ asmlinkage long __wasm_sys_ni_syscall(const struct pt_regs *__unused)
+ 
+ static void do_syscall(struct pt_regs *regs)
+ {
+-	long nr = regs->user.x[8];
++	/* The low 32 bits, as arm64's el0_svc_common() takes an int. */
++	long nr = (int)regs->user.x[8];
+ 
+ 	regs->orig_x0 = regs->user.x[0];
++	regs->syscallno = nr;
+ 	regs->cause = PT_CAUSE_SYSCALL;
+ 
+-	regs->user.x[0] = -ENOSYS;
++	/*
++	 * As arm64's el0_svc_common(): x0 keeps the first argument for a
++	 * tracer's entry stop, and only a user's syscall(-1) presets -ENOSYS,
++	 * since a tracer skips a syscall by setting its number to -1 and x0
++	 * to the result.
++	 */
++	if (nr == NO_SYSCALL)
++		regs->user.x[0] = -ENOSYS;
+ 
+ 	/* False: skip the call and keep x0 (a tracer or seccomp may have set it). */
+ 	if (syscall_enter_from_user_mode_randomize_stack(regs, &nr) &&
+-	    nr >= 0 && nr < NR_syscalls) {
+-		nr = array_index_nospec(nr, NR_syscalls);
+-		regs->user.x[0] = ((syscall_t)sys_call_table[nr])(regs);
++	    nr != NO_SYSCALL) {
++		if (nr >= 0 && nr < NR_syscalls) {
++			nr = array_index_nospec(nr, NR_syscalls);
++			regs->user.x[0] = ((syscall_t)sys_call_table[nr])(regs);
++		} else {
++			regs->user.x[0] = -ENOSYS;
++		}
+ 	}
+ 
+ 	syscall_exit_to_user_mode(regs);
+-- 
+2.56.0
+

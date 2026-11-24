@@ -8,12 +8,13 @@
 //   Ctrl-A o; dimmed while the system does not run: data-off, store.ts
 //   isRunning);
 // - the apps and launcher groups kept in the Dock (pins.ts; by default
-//   Terminal, Chromium, Thunar, Desktop, Games and Settings; on phones
+//   Terminal, Browsers, AI, Desktop, Graphics, Games and Settings; on phones
 //   Terminal, glmark2, Galculator, Desktop and Settings), in their order. A
 //   group's tile (#dock-group-<id>, GroupFace: its icon in front of a small
-//   fan of cards) opens its apps in a popover above it (DockStack.tsx
-//   #dock-stack; a second click closes it), has a running dot while one of
-//   its apps runs and the bar of one being installed; dimmed while the
+//   fan of cards) opens its apps in a stack above it (DockStack.tsx
+//   #dock-stack; useStackHover below: a mouse resting on the tile opens it,
+//   a click keeps it open, a second click closes it), has a running dot while
+//   one of its apps runs and the bar of one being installed; dimmed while the
 //   system does not run (a press says why). An app's tile has its app's
 //   icon, title and key (appwindows.ts
 //   appMeta(): a page app's is its window's). Such a tile stands
@@ -60,6 +61,8 @@
 // above it at once, as on macOS (#dock-label, useDockLabel: one for the
 // Dock): its name, then in a quieter tone its state (why it is dimmed, an
 // install's progress, minimized) and its key; tiles have no native tooltip.
+// A group's tile under a mouse has none (its stack, titled, is what shows),
+// but while it is dimmed.
 // System's window has a window tile like any other (#dock-system). The
 // state, the data disk, memory, Errors, the Control Center and the rest of the
 // system's commands are in the top bar (TopBar.tsx).
@@ -79,9 +82,38 @@
 // Open (Show for a tab of a shared window; a group's: its stack), then Move
 // Left, Move Right (the order of the pins) and Remove from Dock, and keeps
 // them while it is dimmed.
+//
+// A group's stack (useStackHover, DockStack.tsx), with a mouse (pointerType
+// "mouse"; touch and pens tap, as below):
+// - Resting on its tile for OPEN_DELAY ms opens it, unpinned, with no button
+//   down, no menu open, the system running and the page focused; the focus
+//   stays where it is. Resting: the wait starts again each time the pointer
+//   has moved more than REST_SLOP px from where it started, so a pointer
+//   that crosses the tile, however slowly, opens nothing. With a stack open
+//   (not one opened from the keyboard), resting on another group's tile for
+//   SWITCH_DELAY ms switches to that one (unpinned, no growing in), unless
+//   the pointer is on its way from the open stack's tile to the stack (the
+//   triangle from where it left the tile to the stack's bottom corners):
+//   then after OPEN_DELAY ms.
+// - Unpinned, it closes GRACE ms after the pointer left its tile, the stack,
+//   the group tiles and that triangle (or the page), unless its app menu is
+//   open; back in time, it stays.
+// - A click on the tile opens it pinned, or pins it when a hover opened it;
+//   pinned, a click closes it. Pinned, it stays until a press outside, Esc, a
+//   pick, the page losing the focus or a resize (DockStack.tsx). Closed with
+//   the pointer on its tile, a hover does not open it again before the
+//   pointer leaves the tile.
+// - A tap (touch, a pen) toggles it, pinned. Enter or Space on the focused
+//   tile toggles it, opened from the keyboard (its first app takes the
+//   focus; a hover-opened one is pinned and takes it); the focus passing over
+//   a tile opens nothing.
+// - A tile's menu, the launcher opening, the system stopping or the group
+//   leaving the Dock close it. The tile stays pressed (aria-expanded) while
+//   its stack is open, the Dock's magnification follows the pointer over
+//   the Dock and holds while it is over the stack.
 import {
 	createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
-	type KeyboardEvent as RKeyboardEvent, type MouseEvent, type ReactNode, type RefObject,
+	type Dispatch, type KeyboardEvent as RKeyboardEvent, type MouseEvent, type PointerEvent as RPointerEvent, type ReactNode, type RefObject, type SetStateAction,
 } from "react";
 import { isPageApp, type App, type Group } from "../apps/types.ts";
 import { appMeta, appTab, appWindow, WAYLAND, windowApp, windowName } from "../appwindows.ts";
@@ -210,9 +242,10 @@ const notes = (...parts: Array<string | false | undefined>): string => parts.fil
  * (its label, useDockLabel), `note`: its state after it in the label, both in its accessible name unless
  * `label` names it; `cmd`: its command (its key shows while the prefix is armed, and in the label;
  * `shortcut`: another key there instead); `menu`: its context menu; `install`: its app's install (a bar over
- * the face); `expanded`: it opens a popover (a group's stack), shown or not.
+ * the face); `expanded`: it opens a popover (a group's stack), shown or not; `onHover`: the pointer entered,
+ * moved over or left it.
  */
-function Tile({ id, win, title, note, label, cmd, shortcut, on, off, keepMenu, dot, badge, install, expanded, colors, menu, onClick, children }: {
+function Tile({ id, win, title, note, label, cmd, shortcut, on, off, keepMenu, dot, badge, install, expanded, colors, menu, onHover, onClick, children }: {
 	id?: string;
 	/** An app's own colours (as its launcher tile's): a round disc under its icon, on the Dock's glass face; none: the icon alone. */
 	colors?: [string, string];
@@ -223,16 +256,24 @@ function Tile({ id, win, title, note, label, cmd, shortcut, on, off, keepMenu, d
 	off?: boolean;
 	/** Its menu stays while it is off (a pinned app's: Remove from Dock). */
 	keepMenu?: boolean;
-	badge?: string; install?: Install; expanded?: boolean; menu?: MenuBuild; onClick: (e: MouseEvent<HTMLButtonElement>) => void; children: ReactNode;
+	badge?: string; install?: Install; expanded?: boolean; menu?: MenuBuild;
+	onHover?: (e: RPointerEvent<HTMLButtonElement>, how: Hover) => void;
+	onClick: (e: MouseEvent<HTMLButtonElement>) => void; children: ReactNode;
 }) {
 	const handlers = useTileMenu(off && !keepMenu ? undefined : menu, onClick);
+	const long = "onPointerLeave" in handlers ? handlers : undefined;
+	const hover = onHover && {
+		onPointerEnter: (e: RPointerEvent<HTMLButtonElement>) => onHover(e, "enter"),
+		onPointerMove: (e: RPointerEvent<HTMLButtonElement>) => { long?.onPointerMove(e); onHover(e, "move"); },
+		onPointerLeave: (e: RPointerEvent<HTMLButtonElement>) => { long?.onPointerLeave(); onHover(e, "leave"); },
+	};
 	const hint = cmd && keyFor(cmd);
 	// The label's text (useDockLabel reads it from the button): the name, then the note and the key.
 	const quiet = [note, shortcut ?? (hint && `${PREFIX_SHORT} ${hint}`)].filter(Boolean).join(" · ");
 	return (
 		<button id={id} type="button" aria-label={label ?? notes(title, note)} data-label={title} data-label-note={quiet || undefined} aria-pressed={on}
 			aria-haspopup={expanded === undefined ? undefined : "dialog"} aria-expanded={expanded}
-			aria-disabled={off || undefined} data-off={off || undefined} data-win={win} className="dock-tile group relative flex-none" {...handlers}>
+			aria-disabled={off || undefined} data-off={off || undefined} data-win={win} className="dock-tile group relative flex-none" {...handlers} {...hover}>
 			<span className="dock-face">
 				{colors ? <span className="dock-disc" style={{ backgroundImage: `linear-gradient(135deg, ${colors[0]}, ${colors[1]})` }}>{children}</span> : children}
 			</span>
@@ -347,14 +388,19 @@ const magnifies = () => !!FINE?.matches && !reducedMotion();
  * not change). Not on touch, with reduced motion, or while the window tiles
  * scroll (the strip clips then: tiles magnified when they start to go back
  * at once, held or not); not over an open menu. `held` (a tile's
- * menu is open): it stays as it is, so the tile does not shrink away under
- * its menu, and lets go once the menu closes with the pointer elsewhere.
+ * menu or a pinned stack is open): it stays as it is, so the tile does not
+ * shrink away under its menu, and lets go once the menu closes with the
+ * pointer elsewhere. `keep` (a stack the mouse opened): it follows the
+ * pointer over the Dock but stays as it is when the pointer leaves the Dock
+ * (for the stack above its tile), and lets go likewise.
  */
-function useMagnify(dock: RefObject<HTMLElement | null>, strip: RefObject<HTMLElement | null>, held: boolean): void {
+function useMagnify(dock: RefObject<HTMLElement | null>, strip: RefObject<HTMLElement | null>, held: boolean, keep: boolean): void {
 	const hold = useRef(held);
 	hold.current = held;
+	const stay = useRef(keep);
+	stay.current = keep;
 	const release = useRef<() => void>(() => {});
-	useEffect(() => { if (!held) release.current(); }, [held]);
+	useEffect(() => { if (!held && !keep) release.current(); }, [held, keep]);
 	useEffect(() => {
 		const nav = dock.current;
 		if (!nav) return;
@@ -401,7 +447,7 @@ function useMagnify(dock: RefObject<HTMLElement | null>, strip: RefObject<HTMLEl
 			x = e.clientX - nav.getBoundingClientRect().left - nav.clientLeft;
 			if (!frame) frame = requestAnimationFrame(apply);
 		};
-		const leave = () => { inside = false; if (!hold.current) clear(); };
+		const leave = () => { inside = false; if (!hold.current && !stay.current) clear(); };
 		release.current = () => { if (!inside) clear(); };
 		// The tiles start to scroll (useScrollFlag): the strip would clip a magnified tile, held or not.
 		const scrolls = new MutationObserver(() => { if (strip.current?.hasAttribute("data-scroll")) clear(); });
@@ -456,7 +502,8 @@ const LABEL_STILL = 8;
  * goes when the pointer leaves the Dock, on a press or Enter (until another
  * tile), when the tiles scroll, and while `off` (a tile's menu or a group's
  * stack is open, the prefix is armed, compact mode); never for touch or a
- * pen, so a tap leaves none.
+ * pen, so a tap leaves none, nor for a group's tile under the mouse (its
+ * stack shows instead) unless it is dimmed.
  */
 function useDockLabel(dock: RefObject<HTMLElement | null>, nav: RefObject<HTMLElement | null>, strip: RefObject<HTMLElement | null>, label: RefObject<HTMLElement | null>, off: boolean): void {
 	const off$ = useRef(off);
@@ -515,7 +562,13 @@ function useDockLabel(dock: RefObject<HTMLElement | null>, nav: RefObject<HTMLEl
 		const move = (e: PointerEvent) => {
 			if (e.pointerType !== "mouse" || e.buttons) return;
 			const t = tileOf(e.target);
-			if (t && t !== pressed) { pressed = null; tile = t; focus = false; }
+			if (t && t !== pressed) {
+				pressed = null;
+				focus = false;
+				// A group's tile opens its stack under the mouse instead (but dimmed).
+				if (t.getAttribute("aria-haspopup") === "dialog" && !t.hasAttribute("data-off")) { hide(); return; }
+				tile = t;
+			}
 			follow();
 		};
 		const leave = () => {
@@ -559,6 +612,127 @@ function useDockLabel(dock: RefObject<HTMLElement | null>, nav: RefObject<HTMLEl
 	}, [dock, nav, strip, label]);
 }
 
+/**
+ * The open group stack (DockStack.tsx): its group, its tile, the y it stands above (stackTop()), opened from
+ * the keyboard, opened by a hover and not pinned, it replaced another (no growing in).
+ */
+interface Stack { group: Group; el: HTMLElement; top: number; kb: boolean; hover: boolean; quick: boolean }
+
+/** What the pointer did on a group's tile (Tile onHover). */
+type Hover = "enter" | "move" | "leave";
+/**
+ * A mouse resting on a group's tile this long opens its stack; with another stack open, this long switches to
+ * it; one a hover opened closes this long after the pointer left (ms).
+ */
+const OPEN_DELAY = 500, SWITCH_DELAY = 130, GRACE = 300;
+/** The pointer rests while it stays this close to where the wait started (px); further, the wait starts again. */
+const REST_SLOP = 5;
+/** How far the triangle toward the stack reaches past its bottom corners (px). */
+const AIM_SLACK = 12;
+
+/**
+ * The y a stack stands above: its tile's top, or with magnification the top
+ * of the tile fully magnified, so the stack does not move up and down as the
+ * tile under it grows, nor when it switches to another tile.
+ */
+function stackTop(el: HTMLElement): number {
+	const r = el.getBoundingClientRect(), pill = el.closest(".dock-pill")?.getBoundingClientRect();
+	if (!pill || !magnifies() || el.closest("[data-scroll]")) return r.top;
+	return Math.min(r.top, pill.top + el.offsetTop - (MAG_MAX - 1) * el.offsetHeight);
+}
+
+/** Point (x, y) is in the triangle a, b, c (its edges included). */
+function inTriangle(x: number, y: number, ax: number, ay: number, bx: number, by: number, cx: number, cy: number): boolean {
+	const side = (px: number, py: number, qx: number, qy: number) => (x - qx) * (py - qy) - (px - qx) * (y - qy);
+	const d1 = side(ax, ay, bx, by), d2 = side(bx, by, cx, cy), d3 = side(cx, cy, ax, ay);
+	return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+}
+
+/**
+ * A group's stack under the mouse (the header's list: OPEN_DELAY,
+ * SWITCH_DELAY, REST_SLOP, GRACE, the triangle toward the stack). Returns
+ * `tile` (a group tile's pointer entered, moved or left it), `cancel` (a pending open goes: a press, a menu, a click) and
+ * `closed` (a stack closed: with the pointer on its tile, no hover opens it
+ * again before the pointer leaves). A stable object; it reads the stack from
+ * a ref.
+ */
+function useStackHover(stack: Stack | null, setStack: Dispatch<SetStateAction<Stack | null>>) {
+	const now = useRef(stack);
+	now.current = stack;
+	// intent: the open pending (its tile, where the wait started, its timer); exit: where the pointer left the open stack's tile; quiet: a tile the
+	// pointer is on whose stack just closed.
+	const intent = useRef<{ el: HTMLElement; x: number; y: number; t: ReturnType<typeof setTimeout> } | null>(null);
+	const exit = useRef<{ x: number; y: number } | null>(null);
+	const quiet = useRef<HTMLElement | null>(null);
+	const [api] = useState(() => {
+		const cancel = () => { if (intent.current) { clearTimeout(intent.current.t); intent.current = null; } };
+		/** On the way from the open stack's tile to the stack: above the tile, or in the triangle from where it left the tile to the stack's bottom corners. */
+		const aiming = (x: number, y: number): boolean => {
+			const s = now.current, from = exit.current, box = document.getElementById("dock-stack")?.getBoundingClientRect();
+			if (!s || !box?.width) return false;
+			const r = s.el.getBoundingClientRect();
+			if (x >= r.left && x <= r.right && y >= box.bottom && y <= r.bottom) return true;
+			return !!from && inTriangle(x, y, from.x, from.y, box.left - AIM_SLACK, box.bottom, box.right + AIM_SLACK, box.bottom);
+		};
+		/** A hover may open one: the page has the focus, the system runs, no menu is open. */
+		const may = () => document.hasFocus() && isRunning(ui$().get()) && !document.querySelector('[role="menu"]');
+		const open = (g: Group, el: HTMLElement) => setStack((s) => (s?.kb || s?.group.id === g.id || !el.isConnected ? s
+			: { group: g, el, top: stackTop(el), kb: false, hover: true, quick: !!s }));
+		const tile = (g: Group, e: RPointerEvent<HTMLButtonElement>, how: Hover) => {
+			const el = e.currentTarget, s = now.current, p = intent.current;
+			if (how === "leave") {
+				if (p?.el === el) cancel();
+				if (quiet.current === el) quiet.current = null;
+				if (s?.el === el) exit.current = { x: e.clientX, y: e.clientY };
+				return;
+			}
+			if (s?.el === el) { exit.current = null; return; }
+			if (e.pointerType !== "mouse" || e.buttons || quiet.current === el || s?.kb || !may()) { if (p?.el === el) cancel(); return; }
+			// Resting where the wait started: it goes on. Else it starts (again) from here.
+			if (p?.el === el && Math.hypot(e.clientX - p.x, e.clientY - p.y) <= REST_SLOP) return;
+			cancel();
+			// Another stack is open: this one after SWITCH_DELAY, unless the pointer is on its way to that stack.
+			const ms = s && !aiming(e.clientX, e.clientY) ? SWITCH_DELAY : OPEN_DELAY;
+			intent.current = { el, x: e.clientX, y: e.clientY, t: setTimeout(() => { intent.current = null; if (el.matches(":hover") && may()) open(g, el); }, ms) };
+		};
+		const closed = (el: HTMLElement | undefined) => { if (el?.matches(":hover")) quiet.current = el; };
+		return { tile, cancel, closed, aiming };
+	});
+	// A press anywhere: no hover opens one now.
+	useEffect(() => {
+		document.addEventListener("pointerdown", api.cancel, true);
+		return () => { document.removeEventListener("pointerdown", api.cancel, true); api.cancel(); };
+	}, [api]);
+	// One a hover opened: it goes GRACE ms after the pointer left its tile, the stack (and its app menu), the group
+	// tiles (another's hover switches) and the way to it, or left the page; back in time, it stays.
+	useEffect(() => {
+		exit.current = null;
+		if (!stack?.hover) return;
+		let t: ReturnType<typeof setTimeout> | undefined;
+		const keep = () => { clearTimeout(t); t = undefined; };
+		const away = () => {
+			if (document.getElementById("dock-stack-menu")) return;
+			t ??= setTimeout(() => setStack((s) => (s?.hover ? null : s)), GRACE);
+		};
+		const move = (e: PointerEvent) => {
+			if (e.pointerType !== "mouse") return;
+			const at = e.target instanceof Element ? e.target : null;
+			if (at?.closest("#dock-stack, #dock-stack-menu")) { exit.current = null; keep(); }
+			else if ((at && stack.el.contains(at)) || at?.closest('.dock-tile[aria-haspopup="dialog"]:not([data-off])') || api.aiming(e.clientX, e.clientY)) keep();
+			else away();
+		};
+		const out = (e: globalThis.MouseEvent) => { if (!e.relatedTarget) away(); };
+		document.addEventListener("pointermove", move, true);
+		document.addEventListener("mouseout", out, true);
+		return () => {
+			keep();
+			document.removeEventListener("pointermove", move, true);
+			document.removeEventListener("mouseout", out, true);
+		};
+	}, [stack, setStack, api]);
+	return api;
+}
+
 export function Dock() {
 	const wayland = useStore((s) => s.wayland);
 	const wlFocused = useWaylandFocused();
@@ -581,30 +755,42 @@ export function Dock() {
 	const label = useRef<HTMLDivElement>(null);
 	const prefix = useStore((s) => s.prefix);
 	const compact = useWm((s) => s.compact);
-	// The open group stack (DockStack.tsx): its group, its tile and where the tile was, opened from the keyboard or not.
-	const [stack, setStack] = useState<{ group: Group; el: HTMLElement; rect: DOMRect; kb: boolean } | null>(null);
+	// The open group stack (DockStack.tsx) and its hover controller (useStackHover).
+	const [stack, setStack] = useState<Stack | null>(null);
+	const hover = useStackHover(stack, setStack);
 	// A tile's context menu (useTileMenu), built again on each render so it follows its window.
 	const [menu, setMenu] = useState<{ el: HTMLElement; rect: DOMRect; build: MenuBuild } | null>(null);
 	const openMenu = useCallback((el: HTMLElement, build: MenuBuild) => {
+		hover.cancel();
 		setStack(null);
 		setMenu((m) => (m?.el === el ? m : { el, rect: el.getBoundingClientRect(), build }));
-	}, []);
-	/** A group tile's click: its stack, toggled (once the system runs; before, why not). */
+	}, [hover]);
+	/**
+	 * A group tile's click (or Enter, `kb`): its stack, opened pinned; one a hover opened is pinned (from the
+	 * keyboard its first app takes the focus); a pinned one closes. Once the system runs; before, why not.
+	 */
 	const toggleStack = (g: Group, el: HTMLElement | null, kb: boolean) => {
+		hover.cancel();
 		if (!isRunning(ui$().get())) { KW.ui?.toast(`${g.title}: opens once the system is running`); return; }
-		if (!el || stack?.group.id === g.id) { setStack(null); return; }
+		if (!el) { setStack(null); return; }
+		if (stack?.group.id === g.id) {
+			if (stack.hover) setStack({ ...stack, hover: false, kb: stack.kb || kb });
+			else { hover.closed(el); setStack(null); }
+			return;
+		}
 		if (strip.current) reveal(strip.current, el);
-		setStack({ group: g, el, rect: el.getBoundingClientRect(), kb });
+		setStack({ group: g, el, top: stackTop(el), kb, hover: false, quick: false });
 	};
 	const closeStack = (how: StackClose) => {
 		const el = stack?.el;
+		hover.closed(el);
 		setStack(null);
 		if (how === "key" && el?.isConnected) el.focus({ preventScroll: true });
 	};
-	// Its group was taken out of the Dock, or the system stopped: it goes.
+	// Its group was taken out of the Dock, the system stopped or the launcher opened: it goes.
 	useEffect(() => {
-		if (stack && (!running || !pins.some((p) => p.group?.id === stack.group.id) || !stack.el.isConnected)) setStack(null);
-	}, [stack, running, pins]);
+		if (stack && (!running || launcher || !pins.some((p) => p.group?.id === stack.group.id) || !stack.el.isConnected)) setStack(null);
+	}, [stack, running, launcher, pins]);
 	const spec = menu?.build() ?? null;
 	useEffect(() => { if (menu && !spec) setMenu(null); }, [menu, spec]);
 	/** Esc or Tab gives the focus back to the tile; a pick leaves it where the pick put it. */
@@ -614,7 +800,7 @@ export function Dock() {
 		if (how === "key" && el?.isConnected) el.focus({ preventScroll: true });
 	};
 	useScrollFlag(strip);
-	useMagnify(nav, strip, !!menu || !!stack);
+	useMagnify(nav, strip, !!menu || (!!stack && !stack.hover), !!stack?.hover);
 	// No label over an open menu or stack, the shortcuts HUD and the tiles' key hints (the prefix), or on a phone.
 	useDockLabel(root, nav, strip, label, !!menu || !!stack || prefix || compact);
 	// Keep the focused window's tile in view when the tiles scroll (phones).
@@ -629,7 +815,7 @@ export function Dock() {
 		<footer id="dock" ref={root} aria-label="Dock" className="relative flex flex-none items-center justify-center select-none">
 			<div id="dock-label" ref={label} aria-hidden="true"><span /><span /></div>
 			{menu && spec && <Menu id="dock-tile-menu" label={spec.header} header={spec.header} items={spec.items} anchor={menu.rect} onClose={closeMenu} />}
-			{stack && <DockStack key={stack.group.id} group={stack.group} anchor={stack.rect} kb={stack.kb} inside={(t) => !!stack.el.contains(t as Node)} onClose={closeStack} />}
+			{stack && <DockStack key={stack.group.id} group={stack.group} tile={stack.el} top={stack.top} kb={stack.kb} quick={stack.quick} inside={(t) => !!stack.el.contains(t as Node)} onClose={closeStack} />}
 			<DockMenu.Provider value={openMenu}>
 			<nav ref={nav} aria-label="Windows and system" className="dock-pill">
 				<Tile id="dock-launcher" title="Apps" label="unkernel: Apps" cmd="launcher" shortcut={directKeys(command("launcher"))[0]} on={launcher} off={!running} onClick={toggleLauncher}
@@ -647,7 +833,7 @@ export function Dock() {
 									note={instApp ? notes(instApp.title, installNote(inst)) : !running ? "opens once the system is running" : undefined}
 									off={!running} keepMenu expanded={open} install={inst} dot={groupLive(g, terms) ? "on" : undefined}
 									menu={() => ({ header: g.title, items: [{ label: "Open", run: () => toggleStack(g, document.getElementById(`dock-group-${g.id}`), true) }, null, ...dockItems({ group: g })] })}
-									onClick={(e) => toggleStack(g, e.currentTarget, e.detail === 0)}>
+									onHover={(e, how) => hover.tile(g, e, how)} onClick={(e) => toggleStack(g, e.currentTarget, e.detail === 0)}>
 									<GroupFace g={g} />
 								</Tile>
 							);

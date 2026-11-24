@@ -21,6 +21,10 @@
 // with the page's GL option are they fetched): the dev server answers
 // /_gl/<file> itself (serveGl()); a build emits both into
 // /assets/virgl-<sha256 prefix>/ (virgl.mjs finds virgl.wasm next to itself).
+// The guest Vulkan renderer's translator (kwvk-naga.wasm, only with the
+// page's Vulkan option, on the guest's first Vulkan instance) the same way:
+// /_vk/kwvk-naga.wasm in dev (serveGl()), /assets/kwvk-naga-<sha256
+// prefix>.wasm in a build.
 //
 // The images: the dev server answers /distros/<name>.erofs itself
 // (serveDistros(), revalidated: a local image is rebuilt in place); a build
@@ -53,7 +57,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 import { nitro } from "nitro/vite";
-import { GL_FILES, baseSplit, pageSource, rescanImages, servedName, splitBase, type PageImage } from "./scripts/kernel.ts";
+import { GL_FILES, VK_FILE, baseSplit, pageSource, rescanImages, servedName, splitBase, type PageImage } from "./scripts/kernel.ts";
 import { IMMUTABLE, distroReply } from "./server/range.ts";
 
 const require = createRequire(import.meta.url);
@@ -208,7 +212,7 @@ export default defineConfig({
 				// compresses inside): Nitro's dev handler would answer public/ files
 				// compressed and in full.
 				server.middlewares.use(serveDistros);
-				// /_gl/virgl.mjs and virgl.wasm as they are (Vite's transform would rewrite the module).
+				// /_gl/virgl.mjs and virgl.wasm as they are (Vite's transform would rewrite the module), and /_vk/kwvk-naga.wasm.
 				server.middlewares.use(serveGl);
 				// A new base bundle (kernel/build.sh base): split it again. A rebuilt
 				// image (kernel/build.sh distro): the list is read again on the next
@@ -236,8 +240,9 @@ export default defineConfig({
 			},
 			// src/sdk.ts's kernelUrl and kernelSmpUrl (the base bundle's UP and SMP
 			// kernels: /@fs/ files in dev, hashed assets in a build; the SMP one
-			// null without an SMP patch) and glUrl (virgl.mjs, or null without the
-			// GL renderer), and src/config.ts's distros.
+			// null without an SMP patch), glUrl (virgl.mjs, or null without the
+			// GL renderer) and vkShaderUrl (kwvk-naga.wasm, or null without it),
+			// and src/config.ts's distros.
 			resolveId(id) {
 				return id === "virtual:unkernel-kernel" ? "\0virtual:unkernel-kernel" : null;
 			},
@@ -267,12 +272,19 @@ export default defineConfig({
 					this.emitFile({ type: "asset", fileName: `${dir}/${GL_FILES[1]}`, source: await readFile(s.gl.wasm) });
 					gl = `new URL(import.meta.ROLLUP_FILE_URL_${ref}, import.meta.url)`;
 				}
+				let vk = "null";
+				if (s.vk && dev) vk = `new URL("/_vk/${VK_FILE}", globalThis.location.href)`;
+				else if (s.vk) {
+					const ref = this.emitFile({ type: "asset", fileName: `assets/kwvk-naga-${s.vk.sha256.slice(0, 16)}.wasm`, source: await readFile(s.vk.wasm) });
+					vk = `new URL(import.meta.ROLLUP_FILE_URL_${ref}, import.meta.url)`;
+				}
 				const images = dev ? await (devImages ??= rescanImages(s)) : s.distros;
 				const distros = images.map(({ name, url, size, imageId }) => ({ name, url, size, ...(imageId ? { imageId } : {}) }));
 				return [
 					`export const kernelUrl = ${up};`,
 					`export const kernelSmpUrl = ${smp};`,
 					`export const glUrl = ${gl};`,
+					`export const vkShaderUrl = ${vk};`,
 					`export const distros = ${JSON.stringify(distros)};`,
 				].join("\n");
 			},
@@ -432,18 +444,21 @@ async function vercelImmutable(file: string): Promise<void> {
  * The dev server's /_gl/virgl.mjs and /_gl/virgl.wasm: the page's GL
  * renderer files (scripts/kernel.ts), as they are on disk (gl/wasm/build.sh
  * rewrites them in place, so revalidated: no-cache), with the isolation
- * headers. 404 without a GL renderer.
+ * headers. 404 without a GL renderer. Likewise /_vk/kwvk-naga.wasm, the
+ * Vulkan renderer's translator (vk/naga/build.sh).
  */
 function serveGl(req: IncomingMessage, res: ServerResponse, next: () => void): void {
 	const url = (req.url ?? "").split("?")[0]!;
-	if (!url.startsWith("/_gl/")) return next();
+	const vk = url.startsWith("/_vk/");
+	if (!vk && !url.startsWith("/_gl/")) return next();
 	const name = url.slice("/_gl/".length);
 	void pageSource(true).then(async (s) => {
-		const file = !s.gl ? null : name === GL_FILES[0] ? s.gl.mjs : name === GL_FILES[1] ? s.gl.wasm : null;
+		const file = vk ? (s.vk && name === VK_FILE ? s.vk.wasm : null)
+			: !s.gl ? null : name === GL_FILES[0] ? s.gl.mjs : name === GL_FILES[1] ? s.gl.wasm : null;
 		const isolation = { "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp", "cross-origin-resource-policy": "same-origin" };
 		if (!file) {
 			res.writeHead(404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...isolation });
-			return void res.end(`no ${name} on this dev server (${s.glWhy})\n`);
+			return void res.end(`no ${name} on this dev server (${vk ? s.vkWhy : s.glWhy})\n`);
 		}
 		const st = await stat(file);
 		const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;

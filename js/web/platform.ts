@@ -10,20 +10,23 @@
 // or a worker of the caller's own; never on the page's main thread
 // (webCpuBlocker()).
 // The entry (web.ts, or the page's web/src/sdk.ts) passes the
-// default kernel's URL and the GL renderer's (web.ts only), so
+// default kernel's URL, the GL renderer's and the Vulkan translator's (web.ts only), so
 // `new URL(..., import.meta.url)` stays in it.
 
 import type { Platform } from "../core/instance.ts";
+import type { VkPlatform } from "../core/vk.ts";
 import { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB } from "./memory.ts";
 import { spawnWebCpu, webCpuBlocker } from "./cpu.ts";
 import { webDevices } from "./devices.ts";
 import { spawnWebWorker } from "./worker.ts";
 
-export function webPlatform(defaultKernel: URL, glModule?: URL): Platform {
+export function webPlatform(defaultKernel: URL, glModule?: URL, vk?: VkPlatform): Platform {
 	return {
 		defaultKernel: () => defaultKernel,
 		// The `gl` option's renderer (virgl.mjs), imported only when asked for.
 		glModule: glModule && (() => glModule),
+		// The `vk` option's renderer and its translator (kwvk-naga.wasm), loaded only at the guest's first Vulkan instance.
+		vk: vk && (() => vk),
 		defaultMemoryMiB: () => autoMemoryMiB().mib,
 		defaultMemoryFallbackMiB: [...DEFAULT_MEMORY_FALLBACK_MIB],
 		spawnWorker: spawnWebWorker,

@@ -29,6 +29,8 @@ export { ABS_MAX, ABS_X, ABS_Y, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, DOM_CODE_TO_LIN
 export type { Evdev, InputHostOptions, InputState, InputStats } from "./input.ts";
 export { SOUND_FORMAT_S16_LE, SOUND_FORMAT_U8, SoundHost, convertPcm, pcmToFloat32, wavHeader } from "./sound.ts";
 export type { SoundChunk, SoundEvent, SoundFormat, SoundHostOptions, SoundOption, SoundSink, SoundState, SoundStats } from "./sound.ts";
+export { SoundRingReader, SoundRingWriter, createSoundRing } from "./sound-ring.ts";
+export type { SoundRingRecord } from "./sound-ring.ts";
 export type { JitHostOptions, JitStats, KwemuStats } from "./jit.ts";
 export { PROFILE_ANON, PROFILE_UNKNOWN, formatProfile, symbolizeProfile } from "./profile.ts";
 export type { ProfileCpu, ProfileFile, ProfileFileReader, ProfileOptions, ProfilePage, ProfileProcPage, ProfileReport, ProfileRow, ProfileSite, ProfileSymbol, ProfileTier, SamplerHandle, SamplerInit } from "./profile.ts";
@@ -49,6 +51,8 @@ export type { FsSource, Mount, MountErrorCode, MountOptions, MountSpec, MountSta
 export { CMD_PORT, CommandError } from "./commands.ts";
 export { GL_FORWARDER, GL_PORT, GlHost } from "./gl.ts";
 export type { GlOption, GlOptions, GlRendererStatus, GlStats, VirglTotals } from "./gl.ts";
+export { VK_PORT, VkHost } from "./vk.ts";
+export type { VkExternalRef, VkGpuAdapter, VkGpuDevice, VkOption, VkOptions, VkRendererStatus, VkStats } from "./vk.ts";
 export { Deframer, MUX, StreamHost, frame } from "./gl-stream.ts";
 export type { StreamHostStats, VtestRenderer } from "./gl-stream.ts";
 export type { CommandErrorCode, CommandsOption, HostCommand, HostCommandContext, HostCommandResult } from "./commands.ts";

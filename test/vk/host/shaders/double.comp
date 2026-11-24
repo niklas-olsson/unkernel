@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint MUL = 1;
+layout(set = 0, binding = 0) buffer B { uint v[]; } b;
+void main() { b.v[gl_GlobalInvocationID.x] *= MUL; }

@@ -1,0 +1,93 @@
+From 1aa0ce50c13a457311e6ab6ffd245d91944d0025 Mon Sep 17 00:00:00 2001
+From: kernel-wasm <kernel-wasm@localhost>
+Date: Mon, 23 Nov 2026 22:48:26 +0000
+Subject: [PATCH] wasm: make the kernel's writes into user code visible to
+ kwemu
+
+kwemu tracks the stores its guest makes into decoded code, but not the
+kernel's: copy_to_user_page() (ptrace's POKETEXT, /proc/PID/mem) was
+asm-generic's memcpy. The first write into a file's text happened to be
+seen, because breaking COW flushes the page, but a later one into the
+now private page was not where a CPU still had the mm loaded: a
+breakpoint that a debugger inserted or removed again, or a program
+patching itself through /proc/self/mem, ran the old instructions.
+
+Define flush_icache_user_page() to flush the page, as IC IVAU would: on
+the CPUs of the mm for a private executable mapping (a forced write gave
+this mm a page of its own), on every CPU for a shared one.
+---
+ arch/wasm/include/asm/cacheflush.h | 22 ++++++++++++++++++++++
+ arch/wasm/mm/tlb.c                 | 21 +++++++++++++++++++++
+ 2 files changed, 43 insertions(+)
+ create mode 100644 arch/wasm/include/asm/cacheflush.h
+
+diff --git a/arch/wasm/include/asm/cacheflush.h b/arch/wasm/include/asm/cacheflush.h
+new file mode 100644
+index 00000000000..0dbe77729bb
+--- /dev/null
++++ b/arch/wasm/include/asm/cacheflush.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef _ASM_WASM_CACHEFLUSH_H
++#define _ASM_WASM_CACHEFLUSH_H
++
++struct vm_area_struct;
++struct page;
++
++/*
++ * There are no caches, but kwemu keeps decoded and compiled user code
++ * (kw_emu.h, Decoded-code cache), and sees the kernel's writes into it
++ * only after a flush of a page that maps it (mm/tlb.c). The kernel writes
++ * user code through copy_to_user_page(): ptrace's POKETEXT and
++ * /proc/PID/mem.
++ */
++void flush_icache_user_page(struct vm_area_struct *vma, struct page *page,
++			    unsigned long addr, int len);
++#define flush_icache_user_page flush_icache_user_page
++
++#include <asm-generic/cacheflush.h>
++
++#endif /* _ASM_WASM_CACHEFLUSH_H */
+diff --git a/arch/wasm/mm/tlb.c b/arch/wasm/mm/tlb.c
+index 2cc8cd12a5d..154fdb121cb 100644
+--- a/arch/wasm/mm/tlb.c
++++ b/arch/wasm/mm/tlb.c
+@@ -20,6 +20,7 @@
+ #include <linux/mm.h>
+ #include <linux/sched.h>
+ #include <linux/smp.h>
++#include <asm/cacheflush.h>
+ #include <asm/hwcap.h>
+ #include <asm/irq.h>
+ #include <asm/kwcpu.h>
+@@ -347,6 +348,26 @@ void update_mmu_cache_range(struct vm_fault *vmf, struct vm_area_struct *vma,
+ }
+ #endif
+ 
++/*
++ * The kernel wrote user code (copy_to_user_page(): ptrace's POKETEXT,
++ * /proc/PID/mem), which kwemu does not track as it tracks its guest's own
++ * stores: a ptrace breakpoint must take effect, and its removal too, even
++ * in a block decoded or compiled before. A flush of the page makes every
++ * CPU check its blocks there against memory before running them again, as
++ * IC IVAU would. A write to a private mapping went to a page of this mm
++ * alone (a forced write broke COW), so flushing this mm's CPUs is enough,
++ * and nothing runs from a page that is not executable. A shared page may
++ * be code at any address of any mm: flush every CPU.
++ */
++void flush_icache_user_page(struct vm_area_struct *vma, struct page *page,
++			    unsigned long addr, int len)
++{
++	if (vma->vm_flags & VM_SHARED)
++		flush_tlb_all();
++	else if (vma->vm_flags & VM_EXEC)
++		flush_tlb_range(vma, addr & PAGE_MASK, PAGE_ALIGN(addr + len));
++}
++
+ /* mm teardown: never leave the emulator pointing at a freed page table. */
+ void kw_mm_release(struct mm_struct *mm)
+ {
+-- 
+2.56.0
+

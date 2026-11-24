@@ -149,6 +149,7 @@ export function createUi(cfg: Config) {
 		autosuspend: cfg.autosuspendParam,
 		askleave: cfg.askLeave ? "on" : "off",
 		gl: cfg.glParam ? "on" : "off",
+		vk: cfg.vkParam ? "on" : "off",
 	};
 	// Where the root's changes live on the data disk: per distro (guest/base/initramfs/init).
 	const upperDir = `/data/distros/${cfg.guest}/upper`;
@@ -615,6 +616,8 @@ export function createUi(cfg: Config) {
 		set("askleave", o.askleave === "off" ? "0" : null);
 		// Guest GL: saved only where it differs from its default (on where the display is; config.ts glDefault()).
 		set("gl", (o.gl === "on") === glDefault(o.display !== "off") ? null : o.gl === "on" ? "1" : "0");
+		// Guest Vulkan: saved only when off (on by default).
+		set("vk", o.vk === "off" ? "0" : null);
 		return Object.fromEntries([...p].sort(([a], [b]) => a.localeCompare(b)));
 	}
 	/** The options differ from the settings this load booted with (the Reboot button says so). */

@@ -205,6 +205,8 @@ export interface Options {
 	askleave: "on" | "off";
 	/** Guest GL (?gl=), Debian only; on by default where the display is. */
 	gl: "on" | "off";
+	/** Guest Vulkan (?vk=), Debian only; on by default where WebGPU is. */
+	vk: "on" | "off";
 }
 
 type Listener = () => void;

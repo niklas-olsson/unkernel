@@ -1,0 +1,171 @@
+From 58a0f1855c13844dc331e0e516cbf19e30f138b7 Mon Sep 17 00:00:00 2001
+From: kernel-wasm <kernel-wasm@localhost>
+Date: Mon, 23 Nov 2026 22:49:19 +0000
+Subject: [PATCH] wasm: single-step user mode for ptrace
+
+PTRACE_SINGLESTEP failed with EIO, so gdb's stepi, next and step, and
+its stepping over a breakpoint it had just hit, could not work.
+
+kwemu's budget is exact, so stepping needs no help from it: while
+TIF_SINGLESTEP is set, user_mode_loop() gives kw_run() a budget of 1
+taken from the slice, and a KW_EV_BUDGET (or KW_EV_INTERRUPT) that
+retired the instruction becomes SIGTRAP with TRAP_TRACE and pc at the
+next instruction, as arm64's software step reports it. The rest of the
+slice is kept, so ticks and the host yield come as before; with the
+slice used up nothing runs and the tick comes first. Instruction
+samples (prof.c) pause while stepping.
+
+As on arm64 and x86, a stepped SVC is reported at the syscall's exit
+(user_enable_single_step() sets SYSCALL_EXIT_TRAP), a signal handler set
+up while stepping stops at its first instruction (signal_setup_done()),
+and PTRACE_DETACH turns stepping off.
+---
+ arch/wasm/include/asm/ptrace.h      |  3 +++
+ arch/wasm/include/asm/thread_info.h |  3 +++
+ arch/wasm/kernel/ptrace.c           | 17 +++++++++++++++
+ arch/wasm/kernel/signal.c           |  3 ++-
+ arch/wasm/kernel/traps.c            | 34 ++++++++++++++++++++++++++---
+ 5 files changed, 56 insertions(+), 4 deletions(-)
+
+diff --git a/arch/wasm/include/asm/ptrace.h b/arch/wasm/include/asm/ptrace.h
+index ff8ee713b80..1e8b9a762bd 100644
+--- a/arch/wasm/include/asm/ptrace.h
++++ b/arch/wasm/include/asm/ptrace.h
+@@ -56,6 +56,9 @@ static inline void regs_set_return_value(struct pt_regs *regs,
+ 	regs->user.x[0] = val;
+ }
+ 
++/* In software: user_mode_loop() runs one instruction per kw_run(). */
++#define arch_has_single_step()		(1)
++
+ #define current_pt_regs()		task_pt_regs(current)
+ #define current_user_stack_pointer()	user_stack_pointer(current_pt_regs())
+ 
+diff --git a/arch/wasm/include/asm/thread_info.h b/arch/wasm/include/asm/thread_info.h
+index 446dae41f88..3dddf979de2 100644
+--- a/arch/wasm/include/asm/thread_info.h
++++ b/arch/wasm/include/asm/thread_info.h
+@@ -41,5 +41,8 @@ struct thread_info {
+ /* SMP: the affinity excludes its CPU; move on the way to user mode */
+ #define TIF_KW_MOVE		17
+ #define _TIF_KW_MOVE		(1 << TIF_KW_MOVE)
++/* ptrace single-step: kw_run() one instruction at a time (traps.c) */
++#define TIF_SINGLESTEP		18
++#define _TIF_SINGLESTEP		(1 << TIF_SINGLESTEP)
+ 
+ #endif /* _ASM_WASM_THREAD_INFO_H */
+diff --git a/arch/wasm/kernel/ptrace.c b/arch/wasm/kernel/ptrace.c
+index 9cb1174039d..96f8810cfe7 100644
+--- a/arch/wasm/kernel/ptrace.c
++++ b/arch/wasm/kernel/ptrace.c
+@@ -7,6 +7,9 @@
+  * pt_regs, which holds its whole user context whenever it is stopped.
+  * There is no SVE, SME, PAC, MTE, GCS, POE or FPMR state, and no hardware
+  * breakpoints or watchpoints (NT_ARM_HW_BREAK, NT_ARM_HW_WATCH).
++ *
++ * Single-step is the kernel's: while TIF_SINGLESTEP is set, user mode runs
++ * one instruction per kw_run() (traps.c).
+  */
+ 
+ #include <linux/elf.h>
+@@ -235,8 +238,22 @@ const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+ 	return &user_aarch64_view;
+ }
+ 
++void user_enable_single_step(struct task_struct *task)
++{
++	set_tsk_thread_flag(task, TIF_SINGLESTEP);
++	/* A stepped SVC stops at the syscall's exit (syscall_exit_work()). */
++	set_task_syscall_work(task, SYSCALL_EXIT_TRAP);
++}
++
++void user_disable_single_step(struct task_struct *task)
++{
++	clear_tsk_thread_flag(task, TIF_SINGLESTEP);
++	clear_task_syscall_work(task, SYSCALL_EXIT_TRAP);
++}
++
+ void ptrace_disable(struct task_struct *child)
+ {
++	user_disable_single_step(child);
+ }
+ 
+ long arch_ptrace(struct task_struct *child, long request, unsigned long addr,
+diff --git a/arch/wasm/kernel/signal.c b/arch/wasm/kernel/signal.c
+index a794a3227b2..040dd1c6501 100644
+--- a/arch/wasm/kernel/signal.c
++++ b/arch/wasm/kernel/signal.c
+@@ -263,7 +263,8 @@ static void handle_signal(struct ksignal *ksig, struct pt_regs *regs)
+ 
+ 	rseq_signal_deliver(ksig, regs);
+ 	ret = setup_rt_frame(ksig, oldset, regs);
+-	signal_setup_done(ret, ksig, 0);
++	/* A stepping tracee stops at the handler's first instruction. */
++	signal_setup_done(ret, ksig, test_thread_flag(TIF_SINGLESTEP));
+ }
+ 
+ void arch_do_signal_or_restart(struct pt_regs *regs)
+diff --git a/arch/wasm/kernel/traps.c b/arch/wasm/kernel/traps.c
+index 8663c7c492d..525dacb6d5d 100644
+--- a/arch/wasm/kernel/traps.c
++++ b/arch/wasm/kernel/traps.c
+@@ -148,8 +148,8 @@ void __noreturn user_mode_loop(struct pt_regs *regs)
+ 	unsigned int ev;
+ 
+ 	for (;;) {
+-		u64 prof_rest;
+-		bool prof;
++		u64 prof_rest, step_rest = 0;
++		bool prof, step;
+ 
+ 		regs->cause = PT_CAUSE_NONE;
+ 
+@@ -170,9 +170,19 @@ void __noreturn user_mode_loop(struct pt_regs *regs)
+ 		 */
+ 		kw_clear_reservation(cpu);
+ 
++		/*
++		 * ptrace single-step: one instruction of the slice per kw_run().
++		 * With the slice used up nothing runs, and the tick comes first.
++		 */
++		step = unlikely(test_thread_flag(TIF_SINGLESTEP)) && cpu->budget;
++		if (unlikely(step)) {
++			step_rest = cpu->budget - 1;
++			cpu->budget = 1;
++		}
++
+ 		/* Guest PC sampling (prof.c): may lower the budget to its period's end. */
+ resume:
+-		prof = kw_prof_active();
++		prof = !step && kw_prof_active();
+ 		prof_rest = unlikely(prof) ? kw_prof_enter(cpu) : 0;
+ 
+ 		/*
+@@ -197,6 +207,24 @@ void __noreturn user_mode_loop(struct pt_regs *regs)
+ 		if (unlikely(prof) && kw_prof_leave(cpu, regs, ev, prof_rest))
+ 			goto resume;
+ 
++		/*
++		 * A step that retired its instruction (the budget of 1 used)
++		 * traps with pc at the next one, as arm64's software step:
++		 * SIGTRAP, TRAP_TRACE. kwemu may also see an interrupt then; it
++		 * stays pending for the next kw_run(). A stepped SVC stops at
++		 * the syscall's exit instead (SYSCALL_EXIT_TRAP); a fault or a
++		 * trap retired nothing.
++		 */
++		if (unlikely(step)) {
++			bool retired = !cpu->budget;
++
++			cpu->budget += step_rest;
++			if (retired && (ev == KW_EV_BUDGET || ev == KW_EV_INTERRUPT)) {
++				do_user_trap(regs, SIGTRAP, TRAP_TRACE, regs->user.pc);
++				continue;
++			}
++		}
++
+ 		/* A budget of 0 ends the next kw_run() at once (KW_EV_BUDGET). */
+ 		if (ev == KW_EV_SYSCALL || ev == KW_EV_FAULT)
+ 			cpu->budget -= min(cpu->budget, KW_ENTRY_COST);
+-- 
+2.56.0
+

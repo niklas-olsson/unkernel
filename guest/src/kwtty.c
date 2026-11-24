@@ -552,13 +552,23 @@ static void env_set(char **env, int *n, char *kv)
 	env[(*n)++] = kv;
 }
 
+/* Every signal at its default and none blocked, whatever init passed on. */
+static void default_signals(void)
+{
+	struct sigaction sa = { .sa_handler = SIG_DFL };
+	sigset_t none;
+
+	for (int i = 1; i < _NSIG; i++)
+		sigaction(i, &sa, NULL);
+	sigemptyset(&none);
+	sigprocmask(SIG_SETMASK, &none, NULL);
+}
+
 /* The program, in the child: the pty or the pipes are its stdio already. */
 static void __attribute__((noreturn))
 shell_child(int ep, const struct account *a, const char *file, char **argv, char **env)
 {
-	struct sigaction sa = { .sa_handler = SIG_DFL };
 	struct termios t;
-	sigset_t none;
 	int e;
 
 	/* A negative number on the error pipe: becoming the account failed. */
@@ -568,10 +578,7 @@ shell_child(int ep, const struct account *a, const char *file, char **argv, char
 		_exit(127);
 	}
 
-	for (int i = 1; i < _NSIG; i++)
-		sigaction(i, &sa, NULL);
-	sigemptyset(&none);
-	sigprocmask(SIG_SETMASK, &none, NULL);
+	default_signals();
 	if (!tcgetattr(0, &t)) {
 		t.c_iflag |= IUTF8;
 		tcsetattr(0, TCSANOW, &t);
@@ -1925,6 +1932,7 @@ static int login(void)
 		goto fail;
 	argv[1] = NULL;
 	environ = env;
+	default_signals();
 	execv(a.shell, argv);
 	fprintf(stderr, "kwtty login: exec %s: %s\n", a.shell, strerror(errno));
 fail:

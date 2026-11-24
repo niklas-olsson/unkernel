@@ -29,7 +29,9 @@
 #                           shim and bin/: fx, claude, opencode, node,
 #                           npm, npx, bun, bunx, uv, uvx on first use;
 #                           bin/wland: Wayland apps in the page, through
-#                           the relay the Debian image carries),
+#                           the relay the Debian image carries;
+#                           libvulkan_kw.so: guest Vulkan's ICD, vk/icd,
+#                           with usr/share/vulkan/icd.d/kw_icd.json),
 #                           etc/profile.d/{kw-path.sh,kw-term.sh,kw-gl.sh,kw-wayland.sh},
 #                           etc/chromium.d/kw-wayland,
 #                           usr/local/bin/Xwayland (the distro's, with a
@@ -126,6 +128,18 @@ rm -rf "$obj"
 ln -s /kw/layer/usr/bin/kwbox "$stage/usr/bin/kwbox"   # for the base shell
 ln -s ../../bin/kwbox "$layer/usr/lib/kw/kwwasi"
 install_tree "$src/rootfs" "$layer"
+# Guest Vulkan's ICD (vk/icd/build.sh, .agents/vk.md): the Vulkan loader's
+# driver for the SDK's `vk` option, in the layer for the reason vtest-bridge
+# is (its link protocol belongs to the SDK). Its manifest is in the
+# loader's default search path, so a distro's loader (Debian: libvulkan1)
+# finds it with no environment variables. Needs the Vulkan headers on this
+# host; KW_VK=0 leaves it out.
+if [ "${KW_VK:-1}" != 0 ]; then
+	"$root/vk/icd/build.sh" guest >/dev/null
+	install -m 755 "$build/vk/libvulkan_kw.so" "$layer/usr/lib/kw/libvulkan_kw.so"
+	mkdir -p "$layer/usr/share/vulkan/icd.d"
+	install -m 644 "$build/vk/kw_icd.json" "$layer/usr/share/vulkan/icd.d/kw_icd.json"
+fi
 ln -s /kw/layer/usr/sbin/kw-overlay "$stage/usr/sbin/kw-overlay"
 ln -s /kw/layer/usr/lib/kw "$stage/usr/lib/kw"
 find "$stage" -type d -exec chmod go+rx {} +

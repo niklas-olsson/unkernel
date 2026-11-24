@@ -64,7 +64,7 @@ and rejected designs are in kwemu.md.
   (generic executions by FP form), `Jx.sync_site` (where NZCV is
   materialised, counted in the generated code), `Jx.free_why` (modules
   freed by reason, `jc.Why`; the CLI's `[kwemu-free]` line), and generic ops by
-  instruction word (`kwemu.countGenWord`, `JitStats.gen_words`: 512
+  instruction word (`kwemu.countGenWord`, `JitStats.gen_words`: 256
   entries of key = word with Rd and Rn cleared, executions, calls from
   compiled code; `KwemuStats.words` from word 501 on; disassemble the
   keys with llvm-mc).
@@ -127,6 +127,35 @@ the same guests, medians of 5): sieve+fib 1204 MIPS (memory32 1303), mem
 (1364). A register-only loop guest ran 1965 MIPS with lazy NZCV against
 1277 with NZCV packed after every producer. Modules average 1-1.4 KiB
 and take 0.1-0.3 ms each to compile and install.
+
+**7-Zip LZMA** (2026-11-23, i7-10700K, UP bundle, the official static
+arm64 7-Zip 26.04 `7zzs b -mmt1 -md22` on Alpine, `--mem 1024`, 3 boots
+per bundle interleaved, medians): total rating 780 MIPS (774-793;
+compress 463, decompress 1097), against 677 (658-689) for the bundle
+before the changes below in the same session; native x86-64 7-Zip 26.04
+rates about 5800 (`7z b -mmt1`), qemu-aarch64 user mode 1943. In an
+earlier session (the same build without eager NZCV in guests, which
+measured the same: 780): 797 against 679; with a 16 KiB emit
+buffer, no growth towards the region's own page and no self-loop guests
+it was 716, and 679 before `noteExit` tested the closed bit inline; the
+buffer is the gain (own-page growth alone: 707). Stats bundle: 27.9 G
+instructions, 98.7% compiled, 629 M entries into compiled code (823 M
+with 16 KiB), 23.4 M hand-backs (data-TLB misses: the match finder reads
+57 MB at random), 176 M entries into self-loop modules, 421 M after exits
+from closed regions (kwemu.md, Next steps); 126 modules, 56 ms compiling
+1407 KiB. Host `perf` of the 679 MIPS build: about 62% of the time in
+compiled modules, 23% in `run`, `enter` and `noteHot`, 6% in the decoded
+tier and 4% in the MMU's slow paths; a data-TLB check is about 22 wasm
+ops and half the time of the match finder's tree loop. The 32 KiB
+buffer, own-page growth and self-loop guests against the 716 MIPS build
+on the profile disk (`test/app-bench.mjs`, 6 boots, 1 CPU): later runs
+of `claude --help` -1.2%, `npm --version` -0.9%, bun cpu.js -1.4%, bun
+build -5.7%, the mixed sequence +0.8% (the buffer alone: npm +1.2%,
+mixed +2.3%); the Alpine 20-row sum (2 boots) 22.1-23.0 against
+23.2-24.3 s, no apk or ash row slower; hot guests on
+`kwemu-harness-jit.wasm` within -3% to +1% MIPS, except fib: 915 against
+643 MIPS (9 interleaved runs, every run of the new build at or above the
+old median).
 
 **Alpine apk and shell** (2026-11-18, guest seconds, medians of 5, the
 riscv64 guest's last bundle for scale; A64 with generic calls and inline
@@ -261,9 +290,9 @@ evicts 78-706 compiled blocks per step after the first.
   `scvtf` and `fcmp` in Bun and claude, `ldar`/`stlr`, `pmull`/`pmull2`,
   `casl` and `swpl` in npm. The 1024 JIT slots never fill and the tenured
   ring never resets. Two thirds of the modules are `shortened` (the first
-  emit overflowed the 16 KiB buffer, because `jc.candidate` takes any
-  decoded block not compiled yet as a member; those members do run:
-  Rejected designs). With the 128K ring and 320K nursery (stats bundle,
+  emit overflowed the emit buffer, 16 KiB in that measurement, because
+  `jc.candidate` takes any decoded block not compiled yet as a member;
+  those members do run: Rejected designs). With the 128K ring and 320K nursery (stats bundle,
   2026-11-21, later runs of `claude --help` in one boot; the 64K ring
   in parentheses): 70-72% compiled (54-56%), 25-28% counting down
   (42-44%), 78-133 compiles (457-477) taking 30-86 ms (162-198), no

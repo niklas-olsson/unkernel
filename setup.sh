@@ -5,7 +5,8 @@
 # everything (kwemu, patched wasm-ld, the UP and SMP kernels + their
 # 32-bit-memory variants, the data disk template, the base initramfs and
 # the bundle unkernel.wasm with the patch to the SMP kernel, the Alpine
-# and Debian images with distros.json). The browser page (web/)
+# and Debian images with distros.json; guest Vulkan's translator where
+# cargo can target wasm32). The browser page (web/)
 # needs its npm dependencies, which this script does not install: run
 # pnpm install, then pnpm dev.
 #
@@ -100,6 +101,15 @@ check() {
 	else
 		note pnpm "not found (optional, for the SDK build and the browser page: https://pnpm.io/installation)"
 	fi
+	# Optional: guest Vulkan's SPIR-V translator (vk/build.sh naga) needs
+	# cargo with the wasm32-unknown-unknown target; without it the SDK has
+	# no guest Vulkan and the rest builds as usual.
+	if PATH="$PATH:$HOME/.cargo/bin" command -v cargo >/dev/null &&
+		[ -d "$(PATH="$PATH:$HOME/.cargo/bin" rustc --print sysroot 2>/dev/null)/lib/rustlib/wasm32-unknown-unknown" ]; then
+		note cargo "found, with wasm32-unknown-unknown (guest Vulkan's translator)"
+	else
+		note cargo "not found or no wasm32-unknown-unknown target (optional, for guest Vulkan: rustup target add wasm32-unknown-unknown)"
+	fi
 	# Optional: zig build test also runs the A64 test guests under
 	# qemu-aarch64 (QEMU_AARCH64=) and compares; without it, kwemu only.
 	if [ -n "${QEMU_AARCH64:-}" ] || [ -n "$(real_bin qemu-aarch64)" ]; then
@@ -136,6 +146,9 @@ echo "== zig build (kwemu library with the JIT tier, test harness, test guests)"
 echo
 echo "== kernel/build.sh all"
 "$root/kernel/build.sh" all
+echo
+echo "== vk/build.sh naga (guest Vulkan's SPIR-V translator; optional)"
+"$root/vk/build.sh" naga || echo "(skipped: no guest Vulkan in the SDK)"
 
 echo
 echo "Done in $(( (SECONDS - start) / 60 )) min $(( (SECONDS - start) % 60 )) s. Try:"

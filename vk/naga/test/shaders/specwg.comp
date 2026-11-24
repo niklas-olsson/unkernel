@@ -1,0 +1,17 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// A workgroup size and a shared array sized by specialization constants,
+// through an OpSpecConstantOp expression.
+layout(local_size_x_id = 0, local_size_y = 1) in;
+layout(constant_id = 0) const uint WG = 32;
+layout(constant_id = 1) const uint N = 16;
+const uint N2 = N * 2u + (WG > 32u ? 1u : 0u);
+shared float tmp[N2];
+layout(std430, binding = 0) buffer B { float v[]; } b;
+void main() {
+	uint i = gl_LocalInvocationID.x;
+	tmp[i % N2] = b.v[gl_GlobalInvocationID.x];
+	barrier();
+	b.v[gl_GlobalInvocationID.x] = tmp[(i + 1) % N2] * float(WG);
+}

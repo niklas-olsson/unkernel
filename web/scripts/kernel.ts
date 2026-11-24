@@ -55,6 +55,14 @@
 // /assets/virgl-<16 hex digits of their sha256>/, side by side, because
 // virgl.mjs finds virgl.wasm next to itself.
 //
+// The guest Vulkan renderer's SPIR-V to WGSL translator (createKernel({ vk }),
+// the page's Vulkan option): kwvk-naga.wasm (vk/naga/build.sh), optional,
+// picked the same way: KW_VK=<dir> (KW_VK=0: none), else a local build's
+// vendor/build/vk/ with a local kernel, else the release's kwvk-naga.wasm
+// asset. Without it the page offers no Vulkan. The dev server serves it at
+// /_vk/kwvk-naga.wasm; a build emits it as /assets/kwvk-naga-<16 hex digits
+// of its sha256>.wasm.
+//
 // The images' URLs: the dev server answers /distros/<name>.erofs itself
 // (vite.config.ts, server/range.ts; revalidated, since a local image is
 // rebuilt in place). A build names each by its content,
@@ -69,6 +77,7 @@
 //   KW_DISTROS=<dir>          the images (<name>.erofs; distros.json there
 //                             gives their image ids)
 //   KW_GL=<dir> | 0           the GL renderer (virgl.mjs, virgl.wasm) | none
+//   KW_VK=<dir> | 0           the Vulkan translator (kwvk-naga.wasm) | none
 //   KW_KERNEL_RELEASE=<tag>   this release instead of the newest (e.g. v0.2.0)
 //   KW_LOCAL=1 | 0            use a local build when there is one (default,
 //                             except when CI or VERCEL is set) | never
@@ -104,6 +113,9 @@ const LOCAL_DISTROS = `${ROOT}vendor/build/distro/`;
 const LOCAL_GL = `${ROOT}vendor/build/gl-wasm/`;
 /** The guest GL renderer's files (gl/wasm/build.sh; release assets of the same names). */
 export const GL_FILES = ["virgl.mjs", "virgl.wasm"] as const;
+const LOCAL_VK = `${ROOT}vendor/build/vk/`;
+/** The guest Vulkan renderer's translator (vk/naga/build.sh; a release asset of the same name). */
+export const VK_FILE = "kwvk-naga.wasm";
 const BASE_ASSET = "unkernel.wasm";
 const INDEX_ASSET = "distros.json";
 /** An image file: NAME.erofs or NAME.ext4 (distros.json's `file`). */
@@ -150,6 +162,16 @@ export interface PageSource {
 	gl: PageGl | null;
 	/** Where the GL renderer comes from, or why there is none (logged). */
 	glWhy: string;
+	/** The guest Vulkan renderer's translator (see the top), or null: the page offers no Vulkan. */
+	vk: PageVk | null;
+	/** Where the translator comes from, or why there is none (logged). */
+	vkWhy: string;
+}
+
+/** The guest Vulkan renderer's translator: kwvk-naga.wasm. */
+export interface PageVk {
+	wasm: string;
+	sha256: string;
 }
 
 /** The guest GL renderer's files: virgl.mjs and virgl.wasm, in one directory. */
@@ -168,6 +190,8 @@ interface ReleaseMeta extends KernelRelease {
 	abi: number; baseId: string | null; distros: IndexEntry[];
 	/** The GL renderer's files' sha256 (GL_FILES), or null: the release has none; absent in a copy made before the page knew them. */
 	gl?: Record<string, string> | null;
+	/** The Vulkan translator's sha256 (VK_FILE), or null: the release has none; absent in a copy made before the page knew it. */
+	vk?: string | null;
 }
 
 const UA = { "user-agent": "unkernel-web-build" };
@@ -293,7 +317,7 @@ async function localSource(base: string, images: PageImage[], why: string): Prom
 	const want = await wantAbi();
 	const { abi } = await bundleInfo(bytes);
 	if (abi !== want) log(`warning: ${rel(base)} has kwemu ABI ${abi ?? "unknown"}, this checkout's include/kw_emu.h has ${want} (a stale local build?)`);
-	return { why, kernel: { tag: "local", date: (await stat(base)).mtime.toISOString(), sha256: sha256(bytes) }, linux: banner(bytes), base, distros: images, gl: null, glWhy: "" };
+	return { why, kernel: { tag: "local", date: (await stat(base)).mtime.toISOString(), sha256: sha256(bytes) }, linux: banner(bytes), base, distros: images, gl: null, glWhy: "", vk: null, vkWhy: "" };
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +428,8 @@ async function fetchRelease(dev: boolean, why: string): Promise<ReleaseMeta> {
 	const sameDigest = (name: string, sum: string) => !r.assets?.get(name)?.sha256 || r.assets.get(name)!.sha256 === sum;
 	// A copy made before the page knew the GL renderer is fetched again when the release has one.
 	const glKnown = have?.gl !== undefined || (r.assets !== null && !r.assets.has(GL_FILES[0]));
-	if (have?.tag === r.tag && glKnown && sameDigest(BASE_ASSET, have.sha256) && have.distros.every((d) => sameDigest(d.file, d.sha256))) return have;
+	const vkKnown = have?.vk !== undefined || (r.assets !== null && !r.assets.has(VK_FILE));
+	if (have?.tag === r.tag && glKnown && vkKnown && sameDigest(BASE_ASSET, have.sha256) && have.distros.every((d) => sameDigest(d.file, d.sha256))) return have;
 	log(`downloading ${r.tag} (was ${have?.tag ?? "none"})`);
 	const abi = await wantAbi();
 	// distros.json first: it is small, and an old or foreign release fails here.
@@ -441,7 +466,8 @@ async function fetchRelease(dev: boolean, why: string): Promise<ReleaseMeta> {
 			log(`${r.tag}: ${d.file} ${mib(d.size)}, sha256 ${sum.slice(0, 16)} (${d.image ?? "no image id"})`);
 		}
 		const gl = await downloadGl(r, tmp, why);
-		const meta: ReleaseMeta = { tag: r.tag, date: r.date, sha256: sha256(base), abi, baseId: info.base, distros: entries, gl };
+		const vk = await downloadVk(r, tmp, why);
+		const meta: ReleaseMeta = { tag: r.tag, date: r.date, sha256: sha256(base), abi, baseId: info.base, distros: entries, gl, vk };
 		await writeFile(path.join(tmp, META), `${JSON.stringify(meta, null, "\t")}\n`);
 		// Swap: the old copy aside, the new one in, the old one gone.
 		const old = `${DIR}release.old-${process.pid}/`;
@@ -484,6 +510,31 @@ async function downloadGl(r: Resolved, dir: string, why: string): Promise<Record
 	return sums;
 }
 
+/**
+ * The release's Vulkan translator (VK_FILE) into `dir`, checked; null when
+ * the release has none (not listed, or a 404 without the API's list).
+ */
+async function downloadVk(r: Resolved, dir: string, why: string): Promise<string | null> {
+	if (r.assets && !r.assets.has(VK_FILE)) {
+		log(`${r.tag}: no Vulkan translator (${VK_FILE}): the page offers no guest Vulkan`);
+		return null;
+	}
+	let bytes: Uint8Array;
+	try {
+		bytes = await download(r, VK_FILE, why);
+	} catch (e) {
+		if (!r.assets && /has no kwvk/.test((e as Error).message)) {
+			log(`${r.tag}: no Vulkan translator (${VK_FILE}): the page offers no guest Vulkan`);
+			return null;
+		}
+		throw e;
+	}
+	checkWasm(bytes, `${r.tag}: ${VK_FILE}`);
+	await writeFile(path.join(dir, VK_FILE), bytes);
+	log(`${r.tag}: Vulkan translator ${VK_FILE}`);
+	return sha256(bytes);
+}
+
 /** virgl.wasm is wasm; virgl.mjs is the ES module build that finds virgl.wasm next to itself. */
 function checkGlFile(name: string, bytes: Uint8Array, what: string): void {
 	if (name.endsWith(".wasm")) return checkWasm(bytes, what);
@@ -500,9 +551,11 @@ async function releaseSource(dev: boolean, why: string): Promise<PageSource> {
 		name: d.name, url: "", size: d.size, file: path.join(RELEASE_DIR, d.file), sha256: d.sha256, ...(d.image ? { imageId: d.image } : {}),
 	})).sort(byName);
 	const gl = meta.gl ? await glDir(RELEASE_DIR) : null;
+	const vk = meta.vk ? await vkDir(RELEASE_DIR) : null;
 	return {
 		why: `release ${meta.tag} (${why})`, kernel: { tag: meta.tag, date: meta.date, sha256: meta.sha256 }, linux: banner(bytes), base, distros,
 		gl, glWhy: gl ? `release ${meta.tag}` : `release ${meta.tag} has no ${GL_FILES.join(" and ")}`,
+		vk, vkWhy: vk ? `release ${meta.tag}` : `release ${meta.tag} has no ${VK_FILE}`,
 	};
 }
 
@@ -536,6 +589,29 @@ async function withGl(s: PageSource): Promise<PageSource> {
 	return { ...s, gl, glWhy: gl ? `a local build in ${rel(LOCAL_GL)}` : `no ${rel(LOCAL_GL)}${GL_FILES[0]} (gl/wasm/build.sh)` };
 }
 
+/** VK_FILE in `dir`, checked and hashed, or null when it is missing. */
+async function vkDir(dir: string): Promise<PageVk | null> {
+	const wasm = path.join(dir, VK_FILE);
+	if (!(await isFile(wasm))) return null;
+	const bytes = new Uint8Array(await readFile(wasm));
+	checkWasm(bytes, rel(wasm));
+	return { wasm, sha256: sha256(bytes) };
+}
+
+/** The page's Vulkan translator (see the top): KW_VK, else a local kernel's vendor/build/vk/, else the release's. */
+async function withVk(s: PageSource): Promise<PageSource> {
+	const kv = process.env.KW_VK;
+	if (kv === "0") return { ...s, vk: null, vkWhy: "KW_VK=0" };
+	if (kv) {
+		const vk = await vkDir(path.resolve(kv));
+		if (!vk) throw new Error(`KW_VK=${kv}: no ${VK_FILE} there (vk/naga/build.sh)`);
+		return { ...s, vk, vkWhy: `KW_VK=${kv}` };
+	}
+	if (s.kernel.tag !== "local") return s;
+	const vk = await vkDir(LOCAL_VK);
+	return { ...s, vk, vkWhy: vk ? `a local build in ${rel(LOCAL_VK)}` : `no ${rel(LOCAL_VK)}${VK_FILE} (vk/naga/build.sh)` };
+}
+
 async function choose(dev: boolean): Promise<PageSource> {
 	const kk = process.env.KW_KERNEL, kd = process.env.KW_DISTROS;
 	if (kd === "0") throw new Error("KW_DISTROS=0 is gone: the page always boots a distro image (?distro=none is the base shell)");
@@ -559,7 +635,7 @@ async function choose(dev: boolean): Promise<PageSource> {
 }
 
 const describe = (s: PageSource) => `${s.kernel.tag === "local" ? "a local build" : `release ${s.kernel.tag}`}, Linux ${s.linux || "?"}; ` +
-	s.distros.map((d) => `${d.name} ${mib(d.size)}`).join(", ") + `; GL renderer: ${s.gl ? "yes" : "none"}`;
+	s.distros.map((d) => `${d.name} ${mib(d.size)}`).join(", ") + `; GL renderer: ${s.gl ? "yes" : "none"}; Vulkan translator: ${s.vk ? "yes" : "none"}`;
 
 let once: Promise<PageSource> | undefined;
 
@@ -568,7 +644,7 @@ let once: Promise<PageSource> | undefined;
  * dev server's; once per process; see the top). It logs the choice.
  */
 export function pageSource(dev: boolean): Promise<PageSource> {
-	return (once ??= choose(dev).then(withGl).then((s) => {
+	return (once ??= choose(dev).then(withGl).then(withVk).then((s) => {
 		for (const d of s.distros) d.url = `/distros/${dev ? path.basename(d.file) : servedName(d)}`;
 		if (dev) log(`${describe(s)} (${s.why})`);
 		else {
@@ -579,6 +655,7 @@ export function pageSource(dev: boolean): Promise<PageSource> {
 			log(`  base: ${rel(s.base)}`);
 			for (const d of s.distros) log(`  ${d.url} <- ${rel(d.file)}${d.imageId ? ` (${d.imageId})` : ""}`);
 			log(`  GL renderer: ${s.gl ? `${rel(path.dirname(s.gl.mjs))}/ (${s.glWhy})` : `none (${s.glWhy})`}`);
+			log(`  Vulkan translator: ${s.vk ? `${rel(s.vk.wasm)} (${s.vkWhy})` : `none (${s.vkWhy})`}`);
 			log(line);
 		}
 		return s;

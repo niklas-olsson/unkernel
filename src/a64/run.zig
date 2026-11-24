@@ -4,7 +4,7 @@
 //! (`runRef`): one instruction at a time through decode.zig, the semantic
 //! oracle of the decoded-op tier (tier.zig), which is what kw_run runs
 //! unless the library is built with -Dkwemu-a64-ref. struct kw_cpu, the
-//! Sv39-format page-table walker, the TLBs and flushes are kwemu.Cpu
+//! Sv48-format page-table walker, the TLBs and flushes are kwemu.Cpu
 //! (src/emu/kwemu.zig); the exclusive monitor's address is Hart.resv, so kw_clear_reservation and
 //! kw_set_pgd clear it.
 

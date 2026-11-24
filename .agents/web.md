@@ -33,6 +33,7 @@ their top):
   after the preflight passes), `sdk.ts`, `net.ts` (Wisp, and the
   plain-HTTP hosts answered with `fetch()`), `apk.ts` (apk index
   prefetch), `download.ts` (files the page fetches for the guest),
+  `drop.ts` and `upload.ts` (host files dropped on the page, into the guest),
   `sudo.ts` (root in the guest: `SUDO_SH`, `execAsRoot()`), `data.ts` (the
   data disk), `session.ts` (the suspended session), `autosuspend.ts`
   (suspending in the background and the question on leaving: when,
@@ -433,7 +434,14 @@ deploying the page needs no kernel toolchain.
   WebSockets are exempt.
 - The guest network is Wisp, plus `fetch()` for the plain-HTTP hosts of
   `DEFAULT_ROUTES` (config.ts: deb.debian.org through the page's CORS
-  mirror; `?routes=0` sends them through Wisp too). A page served from an origin outside the
+  mirror, apt.ladybird.org through its /ladybird, and mirror.unkernel.dev
+  itself, whose other paths are asked before the upstreams: /github and
+  /ollama (llama.cpp's and Ollama's release files, Ollama's registry) by
+  the llama.cpp and Ollama apps' scripts, and /claude, /nodejs, /opencode,
+  /astral and /github/astral-sh/uv by the install shim, only where the
+  name resolves to a routed address (it checks nothing against a
+  checksum); the Ubuntu app's tarball is the page's own fetch of /ubuntu; `?routes=0` sends them
+  through Wisp too). A page served from an origin outside the
   Wisp server's allow list needs its own Wisp server (js.md). A `ws://`
   server is blocked as mixed content on an `https://` page.
   Network settings' Forward UDP (`?udp=1`) enables outbound IPv4
@@ -579,17 +587,28 @@ deploying the page needs no kernel toolchain.
   tile per other open window (`#dock-terminal-K`, `#dock-display`,
   `#dock-preview`, ...), and while wland's relay is connected
   `#dock-wayland` (Ctrl-A w). Pins (`pins.ts`): localStorage `kw.pins`, an
-  ordered list of app ids and `group:<id>` (by default Terminal, Chromium,
-  Thunar, the Desktop and Games groups, and Settings), changed from the
+  ordered list of app ids and `group:<id>` (by default Terminal, the Browsers,
+  AI, Desktop, Graphics and Games groups, and Settings), changed from the
   tiles' and the launcher's menus (Keep in Dock, Remove from Dock, Move
   Left, Move Right); an entry the registry no longer has is kept but not
   shown. A pinned app's tile stands for its window (`appwindows.ts`
   `windowApp()`: a page app's own window, a terminal app's Terminal or
   Wayland window, its installer), which then has no tile of its own; a
-  pinned group's tile opens its apps in a popover above it (DockStack.tsx,
-  `#dock-stack`). Tiles magnify under a mouse and show a label above them
-  at once (`#dock-label`: the name, the state, the key; no native
-  tooltip), a running dot (busy faint, error red) and an install's bar. A
+  pinned group's tile opens its apps in a stack above it (DockStack.tsx,
+  `#dock-stack`: a macOS Grid stack, the group's title over its apps on
+  a panel of the Dock's glass with a notch pointing at the tile, growing
+  out of it). A mouse resting on a group's tile (within 5 px) for 500 ms
+  opens its stack without moving the focus, and with one open, resting on
+  another group's tile for 130 ms switches to it (500 ms on the way from a
+  tile to its stack); it closes 300 ms after the pointer has left the tile
+  and the stack (`OPEN_DELAY`, `SWITCH_DELAY`, `GRACE` in Dock.tsx). A click opens
+  it pinned (or pins a hovered one) until a click on the tile, a press
+  elsewhere or Esc; a tap (touch, a pen) and Enter or Space toggle it as a
+  click does, the keyboard's putting the focus in it. A tile's menu or the
+  launcher closes it (Dock.tsx's header has the rules). Tiles magnify under
+  a mouse and show a label above them at once (`#dock-label`: the name,
+  the state, the key; no native tooltip; a group's tile shows its stack
+  instead), a running dot (busy faint, error red) and an install's bar. A
   click shows a window, or minimizes the focused one (not in compact
   mode); a right click, a long press or Shift-F10 opens the tile's menu
   (`winmenu.tsx` `windowItems()`, the same items as the top bar's app
@@ -603,7 +622,9 @@ deploying the page needs no kernel toolchain.
   progress and the step, red with the failure's title, a press opens
   System); on the right Errors (`#tb-errors`) while there are any, the
   resource meters (`#tb-cpu`, `#tb-mem`, from sm up `#tb-disk`, `#tb-net`,
-  and `#tb-gpu` while guest GL's renderer is loaded), which open
+  and `#tb-gpu` while guest GL's or guest Vulkan's renderer is loaded: its
+  bar the share of the page's time the two renderers took together, its
+  tooltip each one's figures), which open
   Resources, and the Control Center's item (`#tb-status`,
   `#tb-status-label`). The bar always shows:
   its auto-hide over a maximized window is off (`auto` in TopBar.tsx; the
@@ -619,13 +640,22 @@ deploying the page needs no kernel toolchain.
   mode). Boot options stay in Settings.
 - Resources popover (`ControlCenter.tsx`, `#tb-res`), opened by hovering
   or clicking a meter (that resource's row marked), under the last meter:
-  every resource's sparkline and facts (`Glance.tsx`), then System…
+  every resource's sparkline and facts (`Glance.tsx`; `#tb-gpu` marks both
+  GPU rows, GPU for guest GL and Vulkan), then System…
   (`#tb-res-system`). One of the two popovers is open at a time.
 - Resources (`stats.ts`): one sampler for the meters, the Resources
   popover and System's Overview, never two reads at once: a `vm.exec()` of a POSIX
   sh snippet of builtins only (no program started, nothing read from the
   image) that prints the guest's `/proc` (every few samples also `df`),
-  with the SDK's host counters and guest GL's. A light sample every 5 s
+  with the SDK's host counters, guest GL's (`vm.gl`) and guest Vulkan's
+  (`vm.vk`: status and stats, read only, never `load()`; without `vm.vk`,
+  the option off or no WebGPU, no Vulkan row or panel, as for GL; before
+  the guest's first VkInstance its state, "not loaded"). Vulkan's rates
+  per sample: presents (all, and by external buffer: zero-copy; the rest
+  read back), draws, dispatches, submits, bytes to the GPU and read back,
+  and the renderer's share of the page's time (its parse, translate and
+  encode ms); a new renderer after a device loss gives no rates across it.
+  Its errors and device losses show in red. A light sample every 5 s
   for the meters, a full one every 2 s while the Resources popover or the
   Overview shows; only while the page is visible and the machine runs; the
   last 90 samples kept for the charts.
@@ -660,7 +690,8 @@ deploying the page needs no kernel toolchain.
   Desktop (DesktopSettings.tsx), Session, Keyboard, About; its footer
   says what changed and has Suspend (`#suspend`, Resume once suspended)
   and Reboot (`#reboot`). System: Overview (a resource monitor: the
-  state, CPU, memory, disk, network, GPU with guest GL, the emulator, the
+  state, CPU, memory, disk, network, GPU with guest GL, Vulkan with guest
+  Vulkan, the emulator, the
   busiest processes, the boot timeline with `#stages`, the machine's
   facts; Overview.tsx), Environment (the checks), Kernel log, Errors; its
   footer Copy diagnostics (`#copy`). Each section has a short name (the
@@ -803,6 +834,271 @@ out, so the guest has the vtest link alone, for comparison.
   rate), packages kept across reloads on the
   data disk, the built server's
   `/assets/virgl-*/` files in a browser.
+
+## Guest Vulkan
+
+The Guest Vulkan option (`?vk=`, the `#opt-vk` box in Settings' Display
+and sound, under Guest GL; on by default, saved only as `vk=0`) boots with
+the SDK's `createKernel({ vk: true })` (vk.md): the base's ICD
+(`/usr/lib/kw/libvulkan_kw.so`) talks over vsock port 1018 to a renderer on
+the page thread's WebGPU, in worker mode too. Nothing of it (the
+renderer's chunks and `kwvk-naga.wasm`) is fetched before the guest's
+first VkInstance. Vulkan windows on the Wayland desktop come as external
+buffers where the guest's relay has them (Wayland desktop, Vulkan apps by
+external buffer), else as wl_shm windows (frames read back).
+
+- Only on Debian (`VK_DISTROS`, config.ts) and where `vkBlocker()` passes:
+  the page's build has the translator (`vkShaderUrl`) and the page's
+  thread has `navigator.gpu`. Otherwise the box is unticked and disabled
+  with the reason, and System's Environment row says why (`cfg.vkWhy`; a
+  warning where the option was set). A browser with `navigator.gpu` but
+  no adapter (`vkAdapterBlocker()`: `requestAdapter()` gives none, e.g.
+  Chrome on Linux without its WebGPU flags; asked once at boot, no device
+  made) boots without guest Vulkan the same way: the row and the option's
+  note say why and the launcher's Vulkan apps are disabled. Sessions record nothing of it: the
+  command line is the same, and the renderer is not in snapshots (a resume
+  resets the guest's Vulkan links).
+- The translator is picked like the GL renderer (`withVk()` in
+  `web/scripts/kernel.ts`): `KW_VK=<dir>` (`KW_VK=0`: none), else with a
+  local kernel `vendor/build/vk/kwvk-naga.wasm` (`vk/naga/build.sh`), else
+  the release's `kwvk-naga.wasm` asset (the release workflow builds and
+  attaches it; `release.json`'s `vk`). The dev server answers
+  `/_vk/kwvk-naga.wasm` (`serveGl()`), a build emits
+  `/assets/kwvk-naga-<16 hex digits of its sha256>.wasm`;
+  `virtual:unkernel-kernel`'s `vkShaderUrl`, which `src/sdk.ts` passes to
+  `webPlatform()` with the renderer's modules. The build log's `Vulkan
+  translator:` line says which.
+- `showVk()` (boot.ts): "on, not loaded yet" (`vm.vk.status` idle),
+  "loading", then the WebGPU adapter (`status.adapter`), the load time and
+  from `vm.vk.stats` the instances now and in all and, from the current
+  renderer's counters (`stats.renderer`) over the last 2 s, frames
+  presented a second and draws a frame, its totals, and its errors where
+  there are any (a warning row), every 2 s while they change; a software
+  adapter (SwiftShader) is a warning row; a lost WebGPU device (status
+  "lost", `stats.losses`) a warning row "WebGPU device lost" (the running
+  programs must be restarted, the next one gets a new device); a failed
+  load a failed row and a toast. Once wland has a link the row also says
+  how Vulkan windows reach the page (`KW.wayland.externalBuffers()`):
+  "zero-copy presentation" with the external commits, pictures and the
+  renderer's `externalPresents`, or "by readback into wl_shm" and why.
+- The vkcube app (`apps/gl/vkcube.ts`, Graphics folder; `needs.vk`):
+  `libvulkan1 vulkan-tools`, then `vulkaninfo --summary` and `vkcube --wsi
+  wayland` on the Wayland desktop. The vkmark app (`apps/gl/vkmark.ts`):
+  `vkmark --winsys wayland`. GTK on Vulkan (`apps/gl/gtkvk.ts`):
+  `gtk-4-examples`, `GSK_RENDERER=vulkan gtk4-demo`.
+- D3D12 gears and D3D12 triangle (`apps/gl/d3d12gears.ts`, described at
+  its top, and `d3d12triangle.ts`; Graphics folder, `needs.vk`): vkd3d's
+  Direct3D 12 demos, native Linux programs on D3D12 without Wine (vkd3d
+  turns D3D12 into Vulkan, kwvk Vulkan into WebGPU). Debian's
+  `vkd3d-demos` (vkd3d 1.2: `/usr/bin/vkd3d-gears`, `vkd3d-triangle`;
+  with libvkd3d1, libvkd3d-shader1 and libvkd3d-utils1 about 230 kB to
+  download, 880 KiB installed) and the Xwayland packages (`xwl.ts`): the
+  demos are xcb only, so each runs on a rootful Xwayland of its window's
+  size (300x300, 640x480) with no window manager (`XWL_NO_WM=1`), its
+  frames read back and put with XPutImage (vk.md, Presentation). The
+  gears' X screen is black (`gears.sh`), since the page's window for it
+  is 320 wide. vkd3d makes four pipelines at start-up that WebGPU cannot
+  run (texel buffers, 1D-array storage images) and the demos never bind:
+  kwvk prints a "cannot run on WebGPU" line for each, and the row counts
+  them as renderer errors; the README they print first says these are
+  expected. Esc quits either, and X with it. Clicked on the dev server on
+  2026-11-24 (headless Chromium, SwiftShader, one CPU): on the default
+  disk the installer put in vkd3d-demos and the Xwayland packages over
+  the page's network and the gears drew about 2 min after the click
+  (95 s with vkd3d-demos already on the apps disk), at 28-35 frames a
+  second by the row, 6 draws a frame; the triangle's window then came
+  within seconds of its click (it presents a few frames, then waits for
+  events: no frame rate in the row); both pictures as on lavapipe, no
+  device lost.
+- The llama.cpp app (`apps/agents/llama.ts`, in the AI folder, described at its top; a Terminal
+  window of its own): a language model with every layer on kwvk. The
+  installer puts in `libvulkan1 vulkan-tools libgomp1 libssl3t64 curl
+  ca-certificates` and fetches the model, stories260K (F32, 1.1 MiB, from
+  Hugging Face, which sends CORS headers; `downloads`) into
+  `~/.apps/llama/models/`. Its `llama.sh` checks that `vulkaninfo
+  --summary` names kwvk, fetches llama.cpp's own release build (Ubuntu,
+  arm64, Vulkan; pinned tag and SHA-256, 29 MiB, 77 MiB unpacked into
+  `~/.local/share/llama.cpp/<tag>`) itself over https on its first run,
+  since github.com sends no CORS headers (Debian 13 has no llama.cpp), and
+  runs `llama-completion -ngl 99`: stories without end until Ctrl-C (no
+  token limit, the context shifted when full, end-of-text ignored; the
+  model has no chat template), `TURNS=1` a story the user continues a
+  turn at a time, and a model with a template chats.
+  `MODEL=stories15M|PATH|URL` picks another GGUF; quantized ones abort for
+  now (vk.md, Unsupported), and wider F32 ones on software WebGPU. Only
+  llama's errors and timings reach the terminal (the rest is in
+  `llama.log`), and a refused shader or a lost device gets a one-line
+  hint. Nothing to deploy for it: both downloads come from their
+  upstreams, but the release build's shaders need the translator's
+  member-decoration rule (vk.md, Translator), so a page whose
+  `kwvk-naga.wasm` predates it loses the device at llama's first submit.
+  Driven by a scratch harness on 2026-11-24 (the tile clicked on the dev
+  server, headless Chromium on SwiftShader, one CPU, the prepared disk):
+  the installer about 1 s (the model; the packages were on the disk), the
+  llama.cpp fetch and unpack about 9 s, the first story under 40 s after
+  the click; eval 5.1-6.9 tokens/s, prompt 1.1-1.3 (its first batches
+  wait for pipelines); a later launch's text after 8-10 s at 5.2-6.1
+  tokens/s;
+  `MODEL=stories15M` aborted with the hint (rms_norm_mul_f32_512).
+- The Ollama app (`apps/agents/ollama.ts`, in the AI folder after
+  llama.cpp, described at its top; a Terminal window of its own) runs
+  Ollama's server and `ollama run` on kwvk. Ollama 0.40 runs models in
+  llama.cpp's llama-server, so its GPU path is ggml-vulkan, as in the
+  llama.cpp app. The installer adds `zstd` to llama.cpp's packages and
+  fetches the same stories260K into `~/.apps/ollama/models/`. On its first
+  run `ollama.sh` checks kwvk as `llama.sh` does, then fetches over https,
+  pinned by tag and SHA-256:
+  - Ollama's `bin/ollama` (with its Go code's `GO_LICENSE`), from the first
+    12 MiB of Ollama's linux-arm64 archive by an HTTP range. The archive is
+    1.6 GiB, mostly CUDA, and has no Vulkan backend (Ollama builds that for
+    amd64 only).
+  - llama-server, libllama and ggml, from llama.cpp's Ubuntu arm64 Vulkan
+    build of the tag that Ollama pins (b12651).
+
+  Both go into `~/.local/share/ollama/<version>` (97 MiB; the Vulkan
+  backend in `lib/ollama/vulkan/`). The script then starts `ollama serve`
+  in its own session (log in `ollama.log`) with these settings:
+  - `OLLAMA_IGPU_ENABLE=1`: Ollama drops integrated GPUs, and kwvk is one.
+  - `LLAMA_ARG_FIT_TARGET=64`: llama-server's `-fit` keeps 1 GiB of device
+    memory free, more than kwvk's heap was (half the guest's RAM then; 4 GiB of device-only memory now), and would
+    otherwise put every layer on the CPU.
+  - `OLLAMA_NO_CLOUD=1` and `OLLAMA_KEEP_ALIVE=-1`.
+
+  It stops with a message unless three checks pass: Ollama's "inference
+  compute" line names kwvk, a Vulkan0 model buffer exists after `ollama
+  create` (F32 kept) and a load, and llama-server reports offloaded
+  layers. Its "On kwvk" line gives the load time (the load request: the
+  weights read and uploaded, the first pipelines made), and `ollama run
+  --verbose` ends each reply with Ollama's timings (eval rate: tokens per
+  second), the numbers to compare GPUs and builds by. On a terminal ollama.sh asks which model (a numbered list; Enter takes
+  the first, SmolLM2 135M, which is also the default without a terminal;
+  `MODEL=` skips the question); a model with a chat template gets `ollama
+  run`'s chat. `THINK=0` runs a thinking model without its reasoning,
+  `TEMP=N` serves a derived model with that temperature, a model that does
+  not fit the data disk is refused before its download, and the server is
+  started again when Ollama's GPU discovery (30 s) times out on a cold
+  start. Short names: `smollm2` (served as `smollm2-tools`: a ChatML
+  template with a tool section), `qwen`, `qwen-coder`, `qwen1.5` (Qwen2.5
+  1.5B, 2950 MiB), `llama3.2` (1B, 2364 MiB), `qwen3.5` (0.8B, BF16),
+  `stories260K`. Models:
+  - `MODEL=stories260K`, the story model, runs on software WebGPU too: the
+    script writes a story from "Once upon a time" and reads the user's
+    story starts, sending each as `ollama run --verbose stories260k
+    "TEXT"` (Ollama's generate path), not through `ollama run`'s own
+    prompt, which chats through llama-server's chat endpoint with a
+    template this model does not know.
+  - `MODEL=smollm2` (SmolLM2 135M Instruct, F16, 271 MiB) and the default
+    are small coding models for a real GPU. On SwiftShader both abort at
+    rms_norm_mul_f32_512 (512-wide workgroups) with the hint; on the
+    user's GPU SmolLM2 loaded and answered (2026-11-24). Of the two, only
+    Qwen2.5-Coder's template has tools (`ollama show`).
+  - `MODEL=[user/]name[:tag]` takes any model of Ollama's registry.
+  - `MODEL=PATH.gguf` takes another GGUF. Quantized models abort for now.
+
+  `ollama pull` cannot work in the guest. It refuses redirects to hosts
+  that resolve to non-public addresses, and the page's network answers DNS
+  with synthetic ones (198.18.0.0/15). So the script fetches registry
+  models with curl instead, into Ollama's store as a pull would:
+  - The manifest goes byte for byte to
+    `manifests/registry.ollama.ai/<namespace>/<name>/<tag>`, a path the
+    server reads on each request, so it needs no restart.
+  - Each blob goes to `blobs/sha256-<hex>`, checked against its digest and
+    resumable.
+
+  The script's exit status says why it stopped: 3 a download failed, 4
+  guest Vulkan refused a shader, 5 the WebGPU device was lost, 1 anything
+  else.
+
+  `SERVE=1` runs the server only, for other apps. Once the model is on
+  kwvk, the script writes its Ollama name to `ollama.ready` and waits;
+  Ctrl-C or a TERM stops the server and removes the file. The script never
+  sets `OLLAMA_CONTEXT_LENGTH`, so the server inherits it from the caller.
+  `ollama.ts` exports `OLLAMA_MODEL`, `OLLAMA_MODEL_CTX` and
+  `OLLAMA_MODEL_TOOLS` (stories260k, 2048, false).
+
+  When the script ends it stops the server. A refused shader or a lost
+  device gets a hint like llama.sh's. Nothing needs deploying: all
+  downloads come from their upstreams. Driven by a scratch harness on
+  2026-11-24 (the tile clicked on a dev server of its own, headless
+  Chromium on SwiftShader, one CPU, 1 GiB, the prepared disk):
+  - The installer took 2 s (the model); the two fetches and unpacking 24 s.
+  - The server answered 3 s later. The model was on kwvk ("offloaded 6/6
+    layers to GPU", `ollama ps` "100% GPU") 44 s after the click.
+  - The first story's eval ran at 2.7-4.8 tokens/s. A typed story start
+    ("The little dragon": 8 prompt tokens) ran at 5.1 tokens/s.
+  - Ctrl-D ended it with no ollama or llama-server left.
+- The fx (local model) app (`apps/agents/fx-local.ts`, in the AI folder
+  after fx, described at its top; a Terminal window of its own) runs fx
+  against the Ollama app's server as fx's custom connection `local`. It
+  repeats nothing of Ollama: it writes the Ollama app's files and
+  downloads into `~/.apps/ollama` (shared models, log and `ollama.pid`, so
+  one server at a time), installs its packages plus `jq`, and its
+  `fx-local.sh` runs `SERVE=1 ./ollama.sh` there in the background with
+  `OLLAMA_CONTEXT_LENGTH=CTX`, waits for `ollama.ready`, and stops it when
+  fx quits. The connection (protocol `openai-chat-completions`,
+  `http://127.0.0.1:11434/v1`, auth none, long `timeouts`, and
+  `model_metadata` with `context_window`, `max_output_tokens`,
+  `supports_tool_use` and `supports_vision`) is merged with jq into an
+  app-private `FX_HOME` (`~/.apps/fx-local/fx-home/settings.json`), so the
+  user's `~/.fx` is untouched; fx runs with `FX_PROVIDER=local`,
+  `FX_MODEL` and `FX_AUTO_UPGRADE=0` in `~/.apps/fx-local/work`. fx-local.sh
+  asks which model on a terminal as ollama.sh does, runs it at temperature
+  0 (`TEMP=`) and a thinking model with `reasoning_effort: "none"` in the
+  connection's per-model request fields (`THINK=1` for thinking; untested
+  in fx). The
+  first and default model is `MODEL=qwen` (Qwen2.5 0.5B Instruct,
+  `qwen2.5:0.5b-instruct-fp16`: the smallest one ollama.sh offers that
+  calls fx's tools; CTX 16384; guest memory 3 GiB or more). Qwen2.5-Coder
+  0.5B (`MODEL=qwen-coder`, the same size) answered fx with JSON in a code
+  block instead of tool calls (3 tasks of 3; Qwen2.5 0.5B called tools in
+  2; host CPU, 2026-11-24). fx sends
+  its tools with every request whatever `supports_tool_use` says, and
+  Ollama answers HTTP 400 for a model without them (SmolLM2, the story
+  model), so fx-local.sh stops before fx with such a model. The
+  `context_window` never exceeds the trained context that Ollama's
+  `/api/show` reports, and tool use follows its capabilities
+  (`OLLAMA_MODEL_TOOLS` for the story model; `TOOLS=0|1` overrides). On
+  a real GPU (the user's, 2026-11-24) SmolLM2 loaded and fx reached it
+  (and got that 400); Qwen2.5 with fx on a GPU is untried. The field names
+  follow fx's docs for 0.0.17.
+- The page needs a base bundle with the ICD (vk.md). `test/vk/page-check.mjs`:
+  the dev server on a free port with `KW_KERNEL=$KW_BUILD/vk/base/unkernel.wasm`
+  where it exists (`--kernel FILE`; `--built`: web/.output, whose kernel
+  the build took), the Playwright Chromium with the WebGPU flags (vk.md,
+  Testing), the prepared disk `$KW_BUILD/vk/debian-vk.img` imported (as the
+  `.kwsparse.gz` next to it, made once; `--fresh`: apt instead), the
+  default URL; checks the option on by default with the renderer idle and
+  nothing fetched, `vulkaninfo --summary` naming kwvk, the row naming the
+  adapter, the vkcube tile's window and its pixels and the row's frame
+  rate, how vkcube's frames came (external buffers with no byte read back
+  where the guest's relay has `--external-buffers`, `--relay FILE`
+  pushing an aarch64 wlandr over the image's and restarting the boot's
+  relay; else readback), then the vkmark and GTK on Vulkan tiles' windows where the disk
+  has them (`--disk $KW_BUILD/vk/debian-vk-apps.img`, debian-disk.mjs
+  --apps; `--no-vkmark`, `--no-gtk`), then the D3D12 gears and triangle
+  tiles' Xwayland windows where the disk has vkd3d-demos or with
+  `--vkd3d` (their installer then installs it over the page's network;
+  `--no-vkd3d`): pixels, the gears' change between two screenshots 1 s
+  apart, the row's frame rate printed (`--no-tile`, `--inline`,
+  `--shots DIR`). A reload of the page during the checks (the
+  dev server reloads it when a source in the tree changes, which ends the
+  VM) makes the run "could not run" (exit 2), not a failure.
+- Checked 2026-11-24 with `test/vk/page-check.mjs`, one CPU, a base built
+  with the ICD (Vulkan 1.2; `KW_BASE_OUT` and `kernel/tools/bundle.mjs`,
+  with the SMP patch): worker mode and `--inline` with `--disk
+  debian-vk-apps.img` pass (vulkaninfo apiVersion 1.2.314; the translator
+  loaded in about 30 ms on "google swiftshader"; vkcube 500x500 at 34-45
+  frames a second by the row, 1 draw a frame; vkmark's window 800x600 and
+  gtk4-demo's 828x598 with GTK's Vulkan renderer drawing, non-blank); and
+  `--built` (that base as the local bundle, the default disk). Two earlier
+  `--inline` failures came from the dev server reloading the page for
+  another session's edit of `js/core/vk-host.ts`. The built server sends
+  the translator as `application/wasm`, br-compressed, immutable. Also
+  2026-11-24, the default disk, the image's relay (wland
+  0.1.0-261124-3c987e5): worker mode and `--inline`, vkcube by external
+  buffers (every present an external commit resolved to a picture, 0 bytes
+  read back; resolve 0.13 ms; 32 frames a second by the row); with a relay
+  without external buffers, by readback (1 MB a frame).
 
 ## Wayland desktop
 
@@ -973,7 +1269,23 @@ answered at the kernel's next yield.
   no permission: it reads the page clipboard only from a paste event (or
   on focus where clipboard-read was granted already) and writes only
   around a gesture, so no browser prompts; a relay without the bridge
-  (0.1.0) turns it off for its link.
+  (0.1.0) turns it off for its link. Pasted HTML, images and files are
+  `wayland/paste.ts` (described at its top), which takes those paste
+  events before wland and sets the Wayland selection itself; host to
+  guest only. A page cannot put files on the host clipboard, so files
+  copied in an app show a toast that saves them through the browser
+  (`wayland/copyout.ts`; a folder or several as a .tar.gz), and their
+  paths are kept off the host clipboard (the bridge clears it instead).
+- Drags from the host (`drop.ts`, described at its top): files dropped on
+  an app go into the guest's `~/Downloads` (`upload.ts`; a name taken
+  gets " (2)") and reach it as text/uri-list, dragged text, HTML and
+  links as they are. createWland's own bridge is off (`dnd: false`): it
+  asks its container what is inside, and the apps' elements are not in
+  `#wl-desktop`. On a terminal whose shell is at its prompt they go into
+  the shell's directory instead (`promptDir()`); where a program runs,
+  it gets their quoted paths. A drop elsewhere on the page only copies.
+  Every other drop is cancelled, since the browser would open it over
+  the machine. Folders are not copied.
 - Sessions: kwshm is a device of the snapshot, so a session records it
   (`SessionDevices.shm`; absent in older ones: off) and resumes with its
   own (`adoptSessionGl()`); a fresh boot has it unless `?shm=0` (this
@@ -1025,19 +1337,36 @@ answered at the kernel's next yield.
   compiles on SwiftShader); the window is right either way. An on-demand
   relay started without its render node warns (`linux-dmabuf off for
   now`) and looks the node up again at each dial (page-check `--gpu`).
+- **Vulkan apps by external buffer** (`gpuSource()`'s `resolveExternal`,
+  where `vm.vk` exists, unless `?wlgpu=0`): the guest's `wland` launcher
+  starts the relay with `--external-buffers` where its `--version` lists
+  `external-buffers` (the pinned release's relay does not: Vulkan windows
+  then come by readback), and wland then offers
+  `wland_external_buffer_manager_v1`; the kw ICD names each swapchain image
+  by an id instead of sending its pixels (vk.md, Presentation), and
+  `resolveExternal()` is `vm.vk.externalImage(ref)`: an ImageBitmap copied
+  from the image's GPUTexture on the Vulkan renderer's device, synchronous
+  (a promise would stall every window of the link), null for an id no
+  running program made (the window keeps its last content); `release`
+  closes it, for both kinds. `KW.wayland.externalBuffers()` is wland's
+  `engine.externalBuffers()`; `KW.wayland.stats()` counts `extCommits`,
+  `extImages`, `extMs`, `extMaxMs`, `extDrawMs`; the Guest Vulkan row says
+  which way Vulkan windows come. A relay started without the flag (an
+  older image, a resumed session's) keeps them on readback.
 - What Mesa picks (Debian 13, Mesa 25.0.7; 2026-11-22): EGL's Wayland
   platform on the `virtio_gpu` DRI driver, window configs in B8G8R8A8 and
   B8G8R8X8 only (no R8G8B8A8 one), so ARGB8888 with alpha and XRGB8888
   without, always with the LINEAR modifier (0), never y_invert, plane
-  offset 0, stride width x 4. GTK 4.18 draws with GskGLRenderer (no Vulkan
-  driver installed), which needed renderer patch 14 (gl.md, Patches).
+  offset 0, stride width x 4. GTK 4.18 draws with GskGLRenderer (its default;
+  `GSK_RENDERER=vulkan` uses guest Vulkan, vk.md), which needed renderer
+  patch 14 (gl.md, Patches).
 - One wland release on both sides: the npm version in `web/package.json`
   and the relay's `WLANDR_VERSION` (guest/distro/debian/pins.sh) change
   together (the link protocol is theirs). The relay comes with the Debian
   image, so it matches the page only where the image is the same
   release's (the page's own images are); nothing checks the link's
   version, and `wland` reads only the relay's features for its own flags. The page needs wland
-  0.1.0-261122-6617578 or later, its npm pin (createWland's embedder
+  0.1.0-261122-6617578 or later (createWland's embedder
   options and hooks, `setBounds`, `setTiled`, `setVisible`,
   `setWindowPosition`, besides the `gpu` source, `view`, `readv` and the
   clipboard bridge); older packages lack that API. The
@@ -1045,8 +1374,7 @@ answered at the kernel's next yield.
   build, its entry `wlandr`). The relay at boot needs `--link-on-demand`
   (and `--version`, `--no-fence-wait`), and Firefox's input the core that
   sends seat events to every pointer and keyboard of a client: both in
-  wland 0.1.0-261122-632f589, the relay's pin in pins.sh (the npm pin is
-  the later release; the two differ for now). With an older relay the boot
+  wland 0.1.0-261122-632f589. Both pins are 0.1.0-261124-3c987e5. With an older relay the boot
   starts none and shells get no session (plain apps fail as outside the
   page; `wland CMD` works as before). A new release: `WLANDR_VERSION` and
   `WLANDR_SHA256` in pins.sh and the npm version in `web/package.json`
@@ -1073,8 +1401,8 @@ answered at the kernel's next yield.
   GTK 3 app (l3afpad). The GL windows app (`apps/gl/wlgl.ts`, Debian:
   mesa-utils; `needs.wayland`) runs `es2gears_wayland` after `eglinfo -B
   -p wayland`; its README suggests glmark2-es2-wayland and
-  gtk4-widget-factory (GTK 4). Other Wayland apps are in the Desktop and
-  Games groups: SDL games (what they share: `apps/sdlwl.ts`), X11 apps in
+  gtk4-widget-factory (GTK 4). Other Wayland apps are in the Browsers,
+  Desktop and Games groups: SDL games (what they share: `apps/sdlwl.ts`), X11 apps in
   one rootful Xwayland window with twm (`apps/xwl.ts`). Started from the
   launcher, a Wayland app's terminal is its log (`launcher.ts`): its tab
   opens selected, as any app's, and shows until the app's window maps and
@@ -1209,7 +1537,7 @@ answered at the kernel's next yield.
   time in I/O wait) and the first page takes minutes; with 2 GiB (the
   page's default on desktops) its window maps in about 45 to 65 s (a new
   profile; 24 s for the next start in the same boot). Its input
-  needs wland 0.1.0-261122-632f589 (the pin); before it Firefox took none,
+  needs wland 0.1.0-261122-632f589 or later; before it Firefox took none,
   on the GPU path and in software alike: wland
   0.1.0-261122-f36330a kept one wl_pointer and one wl_keyboard per client (the
   last made; `pointer_id`, `keyboard_id` in its compositor.zig), while
@@ -1935,8 +2263,8 @@ asciiquarium 6.7/6.8 (community), glimmer 0.1 (no packages), Ubuntu 28
 (extracting the pushed tarball; 0.2 later, `apt-get update` 28 s in the
 chroot).
 The REPL and toolchain apps (Claude Code, fx, Bun, Node.js, Python, Go,
-Rust), Doom (Debian's dsda-doom, a Wayland window) and the Desktop and
-Games groups came after that run and have not been through it.
+Rust), Doom (Debian's dsda-doom, a Wayland window) and the Browsers,
+Desktop and Games groups came after that run and have not been through it.
 Docker (Debian only: `docker run --rm hello-world` through the image's
 docker shim, kernel/guest.md) came later too: with Docker installed, its
 command pulled and ran hello-world in 6 s (Node SDK, 1 GiB, data disk, the

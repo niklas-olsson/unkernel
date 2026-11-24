@@ -58,8 +58,8 @@ export interface WorkerBootSpec {
 	 * "display-size" messages; the worker answers the kernel from the latest.
 	 */
 	display?: boolean | DisplaySize;
-	/** A sound card: the sink's preferred rate, and whether the owner wants the PCM ("sound-chunk"). */
-	sound?: false | { rate?: number; chunks: boolean };
+	/** A sound card: the sink's preferred rate, whether the owner wants "sound-wake"/"sound-chunk", and an optional shared PCM ring. */
+	sound?: false | { rate?: number; chunks: boolean; ring?: SharedArrayBuffer };
 	/** A vsock device: the worker's kernel passes packets ("vsock" both ways); the protocol runs on the owner. */
 	vsock?: boolean;
 	/** kwshm: the worker's kernel offers it and runs the owner's "shm" calls (the copies happen there). */
@@ -197,9 +197,11 @@ export type FromWorker =
 	| { t: "frame-buffer"; buffer: SharedArrayBuffer | null; cap: number }
 	/** Shared transport: the answer to FRAME_NOW `id` (and earlier ones); the frame is in the buffer. */
 	| { t: "frame-ready"; id: number; mode: DisplayMode | null }
-	| { t: "sound-state"; state: SoundState; event: SoundEvent }
+	| { t: "sound-state"; state: SoundState; event: SoundEvent; n: number }
 	/** PCM the guest played (transferred); answered by "sound-queued" (throttled). */
 	| { t: "sound-chunk"; seq: number; format: SoundFormat; data: Uint8Array }
+	/** Sound ring: it became non-empty; the owner drains it into onChunk (and onState, in the ring's order). */
+	| { t: "sound-wake" }
 	/** vsock packets from the guest (transferred), in order; posted from inside the import once 64 KiB or 64 packets are waiting, else per microtask. */
 	| { t: "vsock"; packets: Uint8Array[] }
 	/** virtio-gpu 3D: a command for the owner's renderer (data transferred), answered by "gpu-reply" when it has a rid. */

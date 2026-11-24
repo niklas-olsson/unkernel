@@ -1,0 +1,49 @@
+From c9a684915fedf524eff12a98305322cdb970c004 Mon Sep 17 00:00:00 2001
+From: kernel-wasm <kernel-wasm@localhost>
+Date: Mon, 23 Nov 2026 23:00:37 +0000
+Subject: [PATCH] wasm: core dumps
+
+COREDUMP was off: without elf_core_copy_task_fpregs() and arm64's core
+notes, a fault with a core limit would have called a function the arch
+lacks, a wasm trap.
+
+Take the notes from the ptrace regsets, as arm64 does
+(CORE_DUMP_USE_REGSET): NT_PRSTATUS, NT_PRFPREG, NT_ARM_TLS and
+NT_ARM_SYSTEM_CALL for every thread, which gdb reads from the core file.
+Turn on COREDUMP (ELF_CORE follows).
+---
+ arch/wasm/configs/kw_defconfig | 3 ++-
+ arch/wasm/include/asm/elf.h    | 3 +++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/arch/wasm/configs/kw_defconfig b/arch/wasm/configs/kw_defconfig
+index 97272fe582c..89b3be4f2e1 100644
+--- a/arch/wasm/configs/kw_defconfig
++++ b/arch/wasm/configs/kw_defconfig
+@@ -37,7 +37,8 @@ CONFIG_USERFAULTFD=y
+ # CONFIG_KALLSYMS is not set
+ # CONFIG_IO_URING is not set
+ # CONFIG_BPF_SYSCALL is not set
+-# CONFIG_COREDUMP is not set
++# ELF core dumps, their notes from the ptrace regsets (gdb prog core)
++CONFIG_COREDUMP=y
+ # CONFIG_SWAP is not set
+ # CONFIG_COMPAT_BRK is not set
+ # CONFIG_MODULES is not set
+diff --git a/arch/wasm/include/asm/elf.h b/arch/wasm/include/asm/elf.h
+index 3034d5e59d8..fc3631e5a53 100644
+--- a/arch/wasm/include/asm/elf.h
++++ b/arch/wasm/include/asm/elf.h
+@@ -52,6 +52,9 @@ struct linux_binprm;
+ extern int arch_setup_additional_pages(struct linux_binprm *bprm,
+ 				       int uses_interp);
+ 
++/* Core dump notes come from the ptrace regsets (ptrace.c), as on arm64. */
++#define CORE_DUMP_USE_REGSET
++
+ /* struct user_pt_regs: x0..x30, sp, pc, pstate (NZCV, EL0t). */
+ #define ELF_CORE_COPY_REGS(dest, regs)					\
+ do {									\
+-- 
+2.56.0
+

@@ -3,7 +3,7 @@
 //! A tiny "kernel" that drives kwemu through the C ABI only (include/kw_emu.h
 //! via translate-c), the way the real wasm Linux kernel will:
 //!
-//!   * builds Sv39 page tables in its own "physical memory" buffer
+//!   * builds Sv48 page tables in its own "physical memory" buffer
 //!     (physical address 0x8000_0000 = first byte of the buffer, so
 //!     phys_base is non-trivial);
 //!   * loads a static aarch64 ELF, builds argv/envp/auxv on the stack;
@@ -48,7 +48,7 @@ extern fn kw_debug_run_ref(cpu: *kw.struct_kw_cpu, regs: *kw.struct_kw_regs) u32
 const kw_options = @import("kwemu_options");
 /// -Dkwemu-stats only: kwemu.Stats (11 counters, then executed ops per
 /// kind; more after them that the harness does not read).
-extern fn kw_debug_stats(cpu: *kw.struct_kw_cpu, out: *[11 + 192 + 2 + 192 + 40 + 64 + 3 * 512]u64) void;
+extern fn kw_debug_stats(cpu: *kw.struct_kw_cpu, out: *[11 + 192 + 2 + 192 + 40 + 64 + 3 * 256]u64) void;
 
 /// Most argv + envp strings `load` takes.
 pub const max_args = 1024;
@@ -140,7 +140,7 @@ pub const Machine = struct {
     /// Leaf PTE slot for `va`, creating intermediate tables if `create`.
     fn slot(m: *Machine, va: u64, create: bool) ?*u64 {
         var t = m.root;
-        var level: u6 = 2;
+        var level: u6 = 3;
         while (level > 0) : (level -= 1) {
             const e = &m.table(t)[@intCast((va >> (12 + 9 * level)) & 511)];
             if (e.* & pte_v == 0) {
@@ -155,7 +155,7 @@ pub const Machine = struct {
     fn protPte(prot: u64) u64 {
         var p: u64 = 0;
         if (prot & 1 != 0) p |= pte_r;
-        if (prot & 2 != 0) p |= pte_w | pte_r; // W requires R in Sv39
+        if (prot & 2 != 0) p |= pte_w | pte_r; // W requires R in Sv48
         if (prot & 4 != 0) p |= pte_x;
         return p;
     }
@@ -418,7 +418,7 @@ pub const Machine = struct {
     /// -Dkwemu-stats: kwemu's counters and the 40 most executed op kinds
     /// (indexes of src/a64/ops.zig's H).
     fn printKwStats(m: *Machine) void {
-        var st: [11 + 192 + 2 + 192 + 40 + 64 + 3 * 512]u64 = undefined;
+        var st: [11 + 192 + 2 + 192 + 40 + 64 + 3 * 256]u64 = undefined;
         kw_debug_stats(m.cpu, &st);
         m.print("[kwemu-stats] lookups_slow={d} revalidated={d} decoded={d} resets={d} blocks={d} block_insns={d} single_steps={d} walks r/w/x={d}/{d}/{d} generic={d}\n", .{
             st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10],

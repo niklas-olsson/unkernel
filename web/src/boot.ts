@@ -28,7 +28,7 @@ import { prefetchApkIndexes } from "./apk.ts";
 import { createAudioOut } from "./audio.ts";
 import { autoHide } from "./autohide.ts";
 import { AUTO_SUSPEND_HOLD_MS, AutoSuspend, AutoSuspendSkip, LEAVE_OFFER_MS, LEAVE_STAYED_MS, Pause, SuspendSaveError, allowLeave, autoSuspendLabel, pageLeaving, quietStart, resumeAskedFor, resumeChoice, resumedNote, sessionRoom, wantLeavePrompt, type SuspendFacts } from "./autosuspend.ts";
-import { CPUS_ONCE_KEY, FORK_REPO, GL_DISTROS, INLINE_ONCE_KEY, PAGE_COMMIT, PAGE_COMMIT_URL, REPO, UP_ONCE_KEY, dataSizeCap } from "./config.ts";
+import { CPUS_ONCE_KEY, FORK_REPO, GL_DISTROS, INLINE_ONCE_KEY, PAGE_COMMIT, PAGE_COMMIT_URL, REPO, UP_ONCE_KEY, dataSizeCap, vkAdapterBlocker } from "./config.ts";
 import { attachDataDisk, detachDataDisk, downloadKwsparse, exportDataDisk, importDataDisk, resetDataDisk, storageState, acquireDiskLock, type DataAttach } from "./data.ts";
 import { createDisplayUi } from "./display.ts";
 import { isPageChrome, ownsKeys } from "./focus.ts";
@@ -1270,6 +1270,82 @@ export function start(): void {
 	}
 
 	/**
+	 * Guest Vulkan (on by default on Debian where WebGPU is; ?vk=0): the
+	 * Environment tab's "Guest Vulkan" row. The renderer loads on the guest's
+	 * first Vulkan instance (vm.vk.status, vm.vk.loaded), so until then the
+	 * row says it is not loaded; then the WebGPU adapter and how long the load
+	 * took, and (vm.vk.stats, every 2 s while they change) the instances
+	 * served and, from the renderer's counters over the last 2 s, frames
+	 * presented a second and draws per frame, with its errors where there are
+	 * any. A software adapter (SwiftShader) is a warning; so is a lost WebGPU
+	 * device (status "lost": the programs then running were cut off, the next
+	 * one gets a new device), as the GL row's context loss.
+	 */
+	function showVk(vm: KernelHandle) {
+		if (!cfg.vk) {
+			if (cfg.vkWhy) ui.check("vk", "Guest Vulkan", cfg.vkAsked ? "warn" : "info", "off", cfg.vkWhy);
+			return;
+		}
+		const vk = vm.vk;
+		if (!vk) {
+			ui.check("vk", "Guest Vulkan", "fail", "unavailable", "the SDK started no Vulkan renderer (the Kernel log says why)");
+			return;
+		}
+		const how = "Vulkan through the base's ICD (/usr/lib/kw/libvulkan_kw.so) on vsock port 1018; try: sudo apt-get install vulkan-tools, then vulkaninfo --summary, or vkcube --wsi wayland (the launcher's vkcube, vkmark)";
+		let shown = "", reported = false, frames = "";
+		let prev: Record<string, number> | null = null, prevAt = performance.now();
+		const show = () => {
+			const s = vk.status, st = vk.stats, at = performance.now(), r = st.renderer;
+			// Rates over the last interval (at least 1.5 s), from the current renderer's counters (they restart with a new renderer).
+			if (!r) { prev = null; frames = ""; }
+			else if (!prev || (r.presents ?? 0) < (prev.presents ?? 0)) { prev = { ...r }; prevAt = at; }
+			else if (at - prevAt >= 1500) {
+				const p = (r.presents ?? 0) - (prev.presents ?? 0), d = (r.draws ?? 0) - (prev.draws ?? 0), sec = (at - prevAt) / 1000;
+				frames = p ? `${(p / sec).toFixed(1)} frames presented a second, ${(d / p).toFixed(1)} draws a frame over the last ${fmtS(at - prevAt)}`
+					: d ? `${(d / sec).toFixed(0)} draws a second, no presents, over the last ${fmtS(at - prevAt)}` : "";
+				prev = { ...r };
+				prevAt = at;
+			}
+			const total = r ? `; this renderer: ${r.presents ?? 0} presents, ${r.draws ?? 0} draws, ${r.submits ?? 0} submits, ${r.translations ?? 0} shaders translated, ${fmtMiB(r.bytesRead ?? 0)} read back, ${r.liveObjects ?? 0} live objects` : "";
+			const errors = r?.errors ? `; ${plural(r.errors, "renderer error")} (WebGPU validation or failed operations; the browser console has them)` : "";
+			const losses = st.losses ? `; the WebGPU device was lost ${st.losses === 1 ? "once" : `${st.losses} times`}` : "";
+			// Wayland windows: zero-copy where wland offers external buffers on the relay's link (wayland/buffers.ts)
+			const ext = waylandApi.externalBuffers(), ws = waylandApi.stats();
+			const wl = ext === true ? `; Wayland windows: zero-copy presentation (external buffers: ${ws.extCommits} commits, ${ws.extImages} pictures${r ? `, ${r.externalPresents ?? 0} presents without readback` : ""})`
+				: ext === false ? `; Wayland windows: by readback into wl_shm (${cfg.wlGpu ? "the guest's relay has no external buffers" : "?wlgpu=0"})` : "";
+			const now = `${plural(st.connections, "Vulkan instance")} now, ${st.opened} so far${frames ? `; ${frames}` : ""}${total}${errors}${losses}${wl}`;
+			const key = `${s.state} ${s.adapter} ${now}`;
+			if (key === shown) return;
+			shown = key;
+			const name = s.adapter || "WebGPU adapter";
+			const soft = /swiftshader|llvmpipe|software|warp/i.test(name);
+			if (s.state === "ready") {
+				const load = s.loadMs === null ? "loaded" : `loaded in ${fmtS(s.loadMs)} on the guest's first Vulkan instance, ${fmtS(s.startedAt ?? 0)} after the page opened`;
+				if (!reported) {
+					reported = true;
+					console.log(`[unkernel] guest Vulkan: WebGPU adapter ${name}${soft ? " (software rendering)" : ""}; ${load}`);
+					ui.hostLog(`[host] guest Vulkan: WebGPU adapter ${name}${soft ? " (software rendering)" : ""}; ${load}`);
+				}
+				ui.check("vk", "Guest Vulkan", soft || r?.errors ? "warn" : "pass", name, `WebGPU: ${name}${soft ? " (a software adapter: no GPU behind it)" : ""}; ${load}. ${now}. ${how}.`);
+			} else if (s.state === "lost")
+				ui.check("vk", "Guest Vulkan", "warn", "WebGPU device lost", `the browser dropped the renderer's WebGPU device (${s.error ?? "memory pressure, a GPU reset, the GPU process ended"}): ` +
+					`the Vulkan programs that were running lost their device and must be restarted; the next one gets a new device and renderer, no page reload needed. ${now}.`);
+			else if (s.state === "loading")
+				ui.check("vk", "Guest Vulkan", "info", "loading", `${st.losses ? "a Vulkan program after a device loss: making a new renderer" : "the guest's first Vulkan instance: loading the renderer (a WebGPU device, kwvk-naga.wasm)"} for ${fmtS(at - (s.startedAt ?? at))}. ${how}.`);
+			else if (s.state === "failed")
+				ui.check("vk", "Guest Vulkan", "fail", "renderer failed", `the renderer did not load: ${s.error ?? "unknown error"}; Vulkan programs fail to create an instance. ${now}.`);
+			else
+				ui.check("vk", "Guest Vulkan", "info", "on, not loaded yet", `the renderer (WebGPU, and the SPIR-V to WGSL translator kwvk-naga.wasm, about 860 KB) is fetched and started on the guest's first Vulkan instance, which waits for it; nothing of it was loaded at boot. ${how}.`);
+		};
+		show();
+		const timer = setInterval(() => (ended() ? clearInterval(timer) : show()), 2000);
+		vk.loaded.then(show, (e: unknown) => {
+			show();
+			ui.toast(`Guest Vulkan: the renderer did not load (${(e as Error)?.message ?? e})`, { ms: 8000 });
+		});
+	}
+
+	/**
 	 * Guest GL (on by default on Debian; ?gl=0): the Environment tab's "Guest
 	 * GL" row. The renderer loads on the guest's first GL use (vm.gl.status,
 	 * vm.gl.loaded), so until then the row says it is not loaded (or why it
@@ -1590,10 +1666,18 @@ export function start(): void {
 		// first GL use (?glload=eager: before the boot); with it virtio-gpu, the guest's /dev/dri, 3D on
 		// that renderer (?gpu=0: none).
 		// And kwshm, for the Wayland desktop (wayland.ts; a resumed session keeps its own too).
+		// WebGPU without an adapter: this boot runs without guest Vulkan (config.ts vkAdapterBlocker()).
+		if (cfg.vk) {
+			const why = await vkAdapterBlocker();
+			if (why) Object.assign(cfg, { vk: false, vkBlocked: why, vkWhy: why });
+		}
 		const glDevices = () => ({
 			gl: cfg.gl && (cfg.glStrictWaits || cfg.glEager ? { ...(cfg.glStrictWaits ? { strictWaits: true } : {}), ...(cfg.glEager ? { eager: true } : {}) } : true),
 			gpu: cfg.gpu,
 			shm,
+			// Guest Vulkan on this thread's WebGPU (Debian, on by default; showVk()): nothing loads
+			// before the guest's first Vulkan instance, and nothing of it is in a snapshot.
+			vk: cfg.vk,
 		});
 		// A session on this load's CPU count (another: offerResumeCpus(), above).
 		const resume = await offerResume(session, dataDisks);
@@ -1749,6 +1833,7 @@ export function start(): void {
 		};
 		showJit();
 		showGl(vm);
+		showVk(vm);
 
 		// Not fatal, but worth flagging: the kernel started and printed nothing.
 		const bootTime = inst ? inst.kernel.bootTime : performance.now();

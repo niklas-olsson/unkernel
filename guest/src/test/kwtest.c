@@ -8,6 +8,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -152,6 +153,13 @@ static int failures;
 #include <linux/rtnetlink.h>
 #include <linux/fib_rules.h>
 #include <linux/veth.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <elf.h>
+#include <sys/ptrace.h>
+#include <sys/uio.h>
 
 /*
  * The arm64 features the kernel may report (arch/wasm/kernel/cpu.c): the
@@ -1848,6 +1856,634 @@ static void config_checks(void)
 	      WIFEXITED(status) && !WEXITSTATUS(status) ? "ok" : "BAD", uffd >= 0 ? "ok" : "BAD");
 }
 
+static volatile int sys_nr, sys_code, sys_errno;
+static volatile unsigned sys_arch;
+
+static void on_sigsys(int sig, siginfo_t *si, void *uc)
+{
+	sys_nr = si->si_syscall;
+	sys_arch = si->si_arch;
+	sys_code = si->si_code;
+	sys_errno = si->si_errno;
+}
+
+/*
+ * seccomp, each case in a child of its own: a filter (tsync) that checks the
+ * arch and returns ERRNO for getppid, ERRNO for close(4242) only (the first
+ * argument), TRAP for getpgid (SIGSYS with the syscall, the arch and the
+ * data) and ALLOW otherwise; KILL_PROCESS (SIGSYS); strict mode (write
+ * works, getpid is SIGKILL).
+ */
+static void seccomp_checks(void)
+{
+	struct sock_filter f[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getppid, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getpgid, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP | 7),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_close, 0, 3),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4242, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOTTY),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_filter kill[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getppid, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = { sizeof(f) / sizeof(f[0]), f }, kprog = { sizeof(kill) / sizeof(kill[0]), kill };
+	int status, st_kill, st_strict, fds[2];
+	char c = 0;
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		struct sigaction sa = { 0 };
+		int bad = 0;
+
+		sa.sa_sigaction = on_sigsys;
+		sa.sa_flags = SA_SIGINFO;
+		sigaction(SIGSYS, &sa, NULL);
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+		    syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &prog))
+			_exit(1);
+		errno = 0;
+		bad |= (syscall(SYS_getppid) != -1 || errno != EPERM) << 1;
+		errno = 0;
+		bad |= (close(4242) != -1 || errno != ENOTTY) << 2;
+		errno = 0;
+		bad |= (close(4243) != -1 || errno != EBADF) << 3;
+		syscall(SYS_getpgid, 0);
+		bad |= (sys_nr != SYS_getpgid || sys_arch != AUDIT_ARCH_AARCH64 || sys_code != SYS_SECCOMP ||
+			sys_errno != 7) << 4;
+		bad |= !file_has("/proc/self/status", "Seccomp:\t2") << 5;
+		bad |= (getpid() <= 0) << 6;
+		_exit(bad);
+	}
+	waitpid(pid, &status, 0);
+
+	pid = fork();
+	if (pid == 0) {
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) || prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &kprog))
+			_exit(1);
+		syscall(SYS_getppid);
+		_exit(2);
+	}
+	waitpid(pid, &st_kill, 0);
+
+	pipe(fds);
+	pid = fork();
+	if (pid == 0) {
+		if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT))
+			_exit(1);
+		syscall(SYS_write, fds[1], "w", 1);
+		syscall(SYS_getpid);
+		syscall(SYS_exit, 2);
+	}
+	close(fds[1]);
+	read(fds[0], &c, 1);
+	close(fds[0]);
+	waitpid(pid, &st_strict, 0);
+
+	CHECK(WIFEXITED(status) && !WEXITSTATUS(status) && WIFSIGNALED(st_kill) && WTERMSIG(st_kill) == SIGSYS &&
+	      c == 'w' && WIFSIGNALED(st_strict) && WTERMSIG(st_strict) == SIGKILL,
+	      "seccomp: filter %s (%#x), kill %s, strict %s", WIFEXITED(status) && !WEXITSTATUS(status) ? "ok" : "BAD",
+	      WIFEXITED(status) ? WEXITSTATUS(status) : 0x100 | WTERMSIG(status),
+	      WIFSIGNALED(st_kill) && WTERMSIG(st_kill) == SIGSYS ? "ok" : "BAD",
+	      c == 'w' && WIFSIGNALED(st_strict) && WTERMSIG(st_strict) == SIGKILL ? "ok" : "BAD");
+}
+
+/*
+ * ptrace (arch/wasm/kernel/ptrace.c, the single-step in traps.c, the flush
+ * of user code the kernel writes in mm/tlb.c), each case in a traced child:
+ * NT_PRSTATUS, NT_PRFPREG, NT_ARM_TLS and NT_ARM_SYSTEM_CALL read at a BRK
+ * and written back (a non-EL0t pstate refused, other bits than NZCV
+ * dropped); syscall stops with x0 the first argument, a syscall changed and
+ * one skipped through NT_ARM_SYSTEM_CALL, and the first argument changed
+ * through x0; a BRK written over compiled code through /proc/self/mem and
+ * by PTRACE_POKETEXT, then the original put back, twice on one page;
+ * PTRACE_SINGLESTEP over a branch and an SVC (reported at its exit),
+ * through a compiled loop, and into a signal handler.
+ */
+struct pt_gpr { uint64_t x[31], sp, pc, pstate; };
+struct pt_fpr { __uint128_t v[32]; uint32_t fpsr, fpcr, res[2]; };
+
+#define PT_A 0x1122334455667788UL
+#define PT_B 0x0f0e0d0c0b0a0908UL
+#define PT_BRK(n) (0xd4200000u | (n) << 5)
+
+/* PTRACE_GETREGSET/SETREGSET: the length the kernel took, or -errno. */
+static long pt_regset(int req, pid_t pid, int type, void *buf, size_t len)
+{
+	struct iovec iov = { buf, len };
+
+	if (ptrace(req, pid, (void *)(long)type, &iov))
+		return -errno;
+	return (long)iov.iov_len;
+}
+
+/* The next stop of pid: the stop signal and event bits (status >> 8), -1 when it ended. */
+static int pt_wait(pid_t pid)
+{
+	int st;
+
+	if (waitpid(pid, &st, 0) != pid || !WIFSTOPPED(st))
+		return -1;
+	return (st >> 8) & 0xffff;
+}
+
+static int pt_cont(int req, pid_t pid, int sig)
+{
+	if (ptrace(req, pid, 0, (void *)(long)sig))
+		return -1;
+	return pt_wait(pid);
+}
+
+/* Exit status of a child, or 0x100 + the signal that ended it; kills it first if asked. */
+static int pt_reap(pid_t pid, int kill_it)
+{
+	int st;
+
+	if (kill_it)
+		kill(pid, SIGKILL);
+	if (waitpid(pid, &st, 0) != pid)
+		return 0x200;
+	return WIFEXITED(st) ? WEXITSTATUS(st) : 0x100 | WTERMSIG(st);
+}
+
+/* Continue a stopped child to its end: its exit status as pt_reap(). */
+static int pt_finish(pid_t pid)
+{
+	return pt_reap(pid, ptrace(PTRACE_CONT, pid, 0, 0) != 0);
+}
+
+static uint32_t pt_peek32(pid_t pid, uint64_t addr)
+{
+	errno = 0;
+	return (uint32_t)ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, 0);
+}
+
+static int pt_poke32(pid_t pid, uint64_t addr, uint32_t w)
+{
+	unsigned long d;
+
+	errno = 0;
+	d = ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, 0);
+	if (errno)
+		return -1;
+	d = (d & ~0xffffffffUL) | w;
+	return ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)d) ? -1 : 0;
+}
+
+static void pt_regs_child(void)
+{
+	uint64_t out[6], tp = MRS(tpidr_el0);
+	int bad = 0;
+
+	ptrace(PTRACE_TRACEME, 0, 0, 0);
+	__asm__ volatile(
+		"mov x19, %[a]\n\t"
+		"mov x20, %[b]\n\t"
+		"fmov d8, %[a]\n\t"
+		"fmov d9, %[b]\n\t"
+		"msr tpidr_el0, %[b]\n\t"
+		"msr fpcr, %[fc]\n\t"
+		"msr nzcv, %[nz]\n\t"
+		"brk #7\n\t"
+		"str x19, [%[o]]\n\t"
+		"mrs x9, nzcv\n\t"
+		"str x9, [%[o], #8]\n\t"
+		"fmov x9, d9\n\t"
+		"str x9, [%[o], #16]\n\t"
+		"mrs x9, fpcr\n\t"
+		"str x9, [%[o], #24]\n\t"
+		"mrs x9, tpidr_el0\n\t"
+		"str x9, [%[o], #32]\n\t"
+		"str x20, [%[o], #40]\n\t"
+		"msr fpcr, xzr\n\t"
+		:
+		: [a] "r"(PT_A), [b] "r"(PT_B), [fc] "r"(FPCR_RZ), [nz] "r"(0x60000000UL), [o] "r"(out)
+		: "x9", "x19", "x20", "v8", "v9", "memory", "cc");
+	__asm__ volatile("msr tpidr_el0, %0" : : "r"(tp));
+	bad |= (out[0] != PT_B) << 0;
+	bad |= (out[1] != 0x90000000UL) << 1;
+	bad |= (out[2] != PT_A) << 2;
+	bad |= (out[3] != (FPCR_RZ | 1UL << 24)) << 3;
+	bad |= (out[4] != PT_A) << 4;
+	bad |= (out[5] != PT_B) << 5;
+	_exit(bad);
+}
+
+static void pt_regs_checks(void)
+{
+	struct pt_gpr g, g2;
+	struct pt_fpr f;
+	uint64_t tls[2] = { 0, 1 };
+	siginfo_t si = { 0 };
+	int nr = 0, sig, rc;
+	long lg, lf, lt, ls, einval, want_pc = 0;
+	uint32_t word = 0;
+	pid_t pid = fork();
+
+	if (pid == 0)
+		pt_regs_child();
+	sig = pt_wait(pid);
+	lg = pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	lf = pt_regset(PTRACE_GETREGSET, pid, NT_PRFPREG, &f, sizeof(f));
+	lt = pt_regset(PTRACE_GETREGSET, pid, NT_ARM_TLS, tls, sizeof(tls));
+	ls = pt_regset(PTRACE_GETREGSET, pid, NT_ARM_SYSTEM_CALL, &nr, sizeof(nr));
+	ptrace(PTRACE_GETSIGINFO, pid, 0, &si);
+	if (lg == sizeof(g))
+		word = pt_peek32(pid, g.pc);
+	int got = sig == SIGTRAP && si.si_code == TRAP_BRKPT && lg == sizeof(g) && (uint64_t)si.si_addr == g.pc &&
+		  word == PT_BRK(7) && g.x[19] == PT_A && g.x[20] == PT_B && g.pstate == 0x60000000UL &&
+		  lf == sizeof(f) && (uint64_t)f.v[8] == PT_A && (uint64_t)f.v[9] == PT_B && f.fpcr == FPCR_RZ &&
+		  lt == sizeof(tls) && tls[0] == PT_B && tls[1] == 0 && ls == sizeof(nr) && nr == -1;
+
+	/* EL1h, and D set: refused, nothing changed. */
+	g2 = g;
+	g2.pstate = 0x5;
+	einval = pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g2, sizeof(g2));
+	g2.pstate = 0x200;
+	einval = einval == -EINVAL ? pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g2, sizeof(g2)) : einval;
+	/* x19, pc past the BRK, N and V (SSBS dropped), V9, FPCR, TPIDR_EL0. */
+	g.x[19] = PT_B;
+	g.pc += 4;
+	want_pc = g.pc;
+	g.pstate = 0x90000000UL | 0x1000;
+	f.v[9] = PT_A;
+	f.fpcr = FPCR_RZ | 1U << 24;
+	tls[0] = PT_A;
+	tls[1] = 5;
+	int set = pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) == sizeof(g) &&
+		  pt_regset(PTRACE_SETREGSET, pid, NT_PRFPREG, &f, sizeof(f)) == sizeof(f) &&
+		  pt_regset(PTRACE_SETREGSET, pid, NT_ARM_TLS, tls, sizeof(tls)) == sizeof(tls) &&
+		  pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g2, sizeof(g2)) == sizeof(g2) &&
+		  g2.pstate == 0x90000000UL && g2.pc == (uint64_t)want_pc && g2.x[19] == PT_B;
+	rc = pt_finish(pid);
+	CHECK(got && einval == -EINVAL && set && rc == 0,
+	      "ptrace regsets: read at BRK %s (stop %#x, sizes %ld %ld %ld %ld), bad pstate %s, written %s, child saw %#x",
+	      got ? "ok" : "BAD", sig, lg, lf, lt, ls, einval == -EINVAL ? "refused" : "BAD", set ? "ok" : "BAD", rc);
+}
+
+/* Up to the entry stop of syscall nr with first argument a0 (the info, op ENTRY), or -1. */
+static int pt_to_entry(pid_t pid, int nr, unsigned long a0, struct __ptrace_syscall_info *si)
+{
+	for (int i = 0; i < 20; i++) {
+		if (pt_cont(PTRACE_SYSCALL, pid, 0) != (SIGTRAP | 0x80) ||
+		    ptrace(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(*si), si) <= 0)
+			return -1;
+		if (si->op == PTRACE_SYSCALL_INFO_ENTRY && si->entry.nr == (unsigned long)nr && si->entry.args[0] == a0)
+			return 0;
+	}
+	return -1;
+}
+
+/* To the exit stop of the syscall entered; its result, or -12345. */
+static long pt_to_exit(pid_t pid)
+{
+	struct __ptrace_syscall_info si;
+
+	if (pt_cont(PTRACE_SYSCALL, pid, 0) != (SIGTRAP | 0x80) ||
+	    ptrace(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(si), &si) <= 0 || si.op != PTRACE_SYSCALL_INFO_EXIT)
+		return -12345;
+	return si.exit.rval;
+}
+
+static void pt_syscall_checks(void)
+{
+	struct __ptrace_syscall_info si;
+	struct pt_gpr g;
+	int nr = 0, entry = 0, rc;
+	long r1 = 0, r2 = 0, r3 = 0;
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		int bad = 0;
+
+		ptrace(PTRACE_TRACEME, 0, 0, 0);
+		raise(SIGSTOP);
+		bad |= (syscall(SYS_close, 4242) != getpid()) << 0;	/* made getpid */
+		bad |= (syscall(SYS_close, 4243) != 77) << 1;		/* skipped, x0 = 77 */
+		bad |= (syscall(SYS_getpgid, 999999) != getpgid(0)) << 2;	/* x0 = 0 */
+		_exit(bad);
+	}
+	if (pt_wait(pid) != SIGSTOP || ptrace(PTRACE_SETOPTIONS, pid, 0, (void *)PTRACE_O_TRACESYSGOOD))
+		goto out;
+	/* close(4242): x0 is the argument at the entry stop, x8 and NT_ARM_SYSTEM_CALL the number. */
+	if (pt_to_entry(pid, SYS_close, 4242, &si) ||
+	    pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) ||
+	    pt_regset(PTRACE_GETREGSET, pid, NT_ARM_SYSTEM_CALL, &nr, sizeof(nr)) != sizeof(nr))
+		goto out;
+	entry = si.arch == AUDIT_ARCH_AARCH64 && g.x[0] == 4242 && g.x[8] == SYS_close && nr == SYS_close;
+	nr = SYS_getpid;
+	pt_regset(PTRACE_SETREGSET, pid, NT_ARM_SYSTEM_CALL, &nr, sizeof(nr));
+	r1 = pt_to_exit(pid);
+	/* close(4243) skipped with the result 77. */
+	if (pt_to_entry(pid, SYS_close, 4243, &si) ||
+	    pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g))
+		goto out;
+	g.x[0] = 77;
+	nr = -1;
+	pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	pt_regset(PTRACE_SETREGSET, pid, NT_ARM_SYSTEM_CALL, &nr, sizeof(nr));
+	r2 = pt_to_exit(pid);
+	/* getpgid(999999) run as getpgid(0). */
+	if (pt_to_entry(pid, SYS_getpgid, 999999, &si) ||
+	    pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g))
+		goto out;
+	g.x[0] = 0;
+	pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	r3 = pt_to_exit(pid);
+	rc = pt_finish(pid);
+	CHECK(entry && r1 == pid && r2 == 77 && r3 == getpgid(0) && rc == 0,
+	      "ptrace syscall stops: entry regs %s, close made getpid %ld, skipped %ld, x0 changed %ld, child %#x",
+	      entry ? "ok" : "BAD", r1, r2, r3, rc);
+	return;
+out:
+	CHECK(0, "ptrace syscall stops: stop sequence broken (child %#x)", pt_reap(pid, 1));
+}
+
+/* A few instructions, called through a pointer so that it stays a call. */
+__attribute__((noinline, aligned(64))) static long pt_fn(long x)
+{
+	return x * 3 + 1;
+}
+static long (*volatile pt_fnp)(long) = pt_fn;
+
+/* Enough calls for pt_fn and the loop to be compiled (2^17 instructions a block). */
+static long pt_warm(void)
+{
+	long s = 0;
+
+	for (long i = 0; i < 200000; i++)
+		s += pt_fnp(i);
+	return s;
+}
+#define PT_WARM (3L * (199999L * 200000L / 2) + 200000L)
+
+/* Child: BRK over pt_fn through /proc/self/mem, then the original back, twice. */
+static int pt_selfmem_child(void)
+{
+	struct sigaction sa = { .sa_sigaction = on_trap, .sa_flags = SA_SIGINFO };
+	uint32_t orig, brk = PT_BRK(9);
+	off_t off = (off_t)(uintptr_t)pt_fn;
+	int fd = open("/proc/self/mem", O_RDWR), bad = 0;
+	long r;
+
+	if (fd < 0 || pread(fd, &orig, 4, off) != 4)
+		return 0x40;
+	/* A stale BRK outside the expected trap kills the child (SIGTRAP), and nothing may hang. */
+	alarm(30);
+	for (int round = 0; round < 2; round++) {
+		bad |= (pt_warm() != PT_WARM) << (round * 3);
+		if (pwrite(fd, &brk, 4, off) != 4)
+			return 0x80;
+		trap_sig = 0;
+		sigaction(SIGTRAP, &sa, NULL);
+		if (!sigsetjmp(trap_jmp, 1))
+			pt_fnp(5);
+		signal(SIGTRAP, SIG_DFL);
+		bad |= !(trap_sig == SIGTRAP && trap_addr == (uintptr_t)pt_fn) << (round * 3 + 1);
+		if (pwrite(fd, &orig, 4, off) != 4)
+			return 0x80;
+		r = pt_fnp(5);
+		bad |= (r != 16) << (round * 3 + 2);
+		if (bad)
+			break;
+	}
+	return bad;
+}
+
+static void pt_poke_checks(void)
+{
+	struct pt_gpr g;
+	uint32_t orig;
+	int rc, sm, stops = 0;
+	pid_t pid = fork();
+
+	if (pid == 0)
+		_exit(pt_selfmem_child());
+	sm = pt_reap(pid, 0);
+
+	pid = fork();
+	if (pid == 0) {
+		int bad = 0;
+
+		ptrace(PTRACE_TRACEME, 0, 0, 0);
+		for (int round = 0; round < 2; round++) {
+			bad |= (pt_warm() != PT_WARM) << (round * 2);
+			raise(SIGSTOP);
+			bad |= (pt_fnp(5) != 16) << (round * 2 + 1);
+		}
+		_exit(bad);
+	}
+	orig = 0;
+	for (int round = 0; round < 2; round++) {
+		if (pt_wait(pid) != SIGSTOP)
+			break;
+		if (!round)
+			orig = pt_peek32(pid, (uintptr_t)pt_fn);
+		/* The BRK must trap at pt_fn, and after the original is back pt_fn must run. */
+		if (pt_poke32(pid, (uintptr_t)pt_fn, PT_BRK(9)) ||
+		    pt_cont(PTRACE_CONT, pid, 0) != SIGTRAP ||
+		    pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) ||
+		    g.pc != (uintptr_t)pt_fn || pt_poke32(pid, (uintptr_t)pt_fn, orig) ||
+		    ptrace(PTRACE_CONT, pid, 0, 0))
+			break;
+		stops++;
+	}
+	rc = pt_reap(pid, stops != 2);
+	CHECK(sm == 0 && stops == 2 && rc == 0,
+	      "ptrace text writes (JIT warm): /proc/self/mem BRK and back twice %s (%#x), POKETEXT twice %d/2, child %#x",
+	      sm == 0 ? "ok" : "BAD", sm, stops, rc);
+}
+
+static volatile int pt_usr1;
+static void pt_on_usr1(int sig)
+{
+	(void)sig;
+	pt_usr1 = 1;
+}
+
+static void pt_step_child(void)
+{
+	signal(SIGUSR1, pt_on_usr1);
+	ptrace(PTRACE_TRACEME, 0, 0, 0);
+	__asm__ volatile(
+		"brk #1\n\t"		/* P */
+		"mov x9, #1\n\t"	/* P+4 */
+		"add x9, x9, #1\n\t"	/* P+8 */
+		"mov x8, #172\n\t"	/* P+12: getpid */
+		"svc #0\n\t"		/* P+16 */
+		"add x9, x9, #1\n\t"	/* P+20 */
+		"b 1f\n\t"		/* P+24 */
+		"brk #2\n\t"		/* P+28 */
+		"1: nop\n\t"		/* P+32 */
+		"brk #3\n\t"		/* P+36 */
+		"mov x9, #0\n\t"
+		"mov x10, #0x4000\n\t"
+		"movk x10, #4, lsl #16\n\t"	/* 278528 passes: compiled */
+		"2: add x9, x9, #1\n\t"	/* L */
+		"cmp x9, x10\n\t"	/* L+4 */
+		"b.ne 2b\n\t"		/* L+8 */
+		"brk #4\n\t"		/* L+12 */
+		"brk #5\n\t"
+		: : : "x0", "x8", "x9", "x10", "memory", "cc");
+	_exit(pt_usr1 ? 0 : 1);
+}
+
+static void pt_step_checks(void)
+{
+	static const int adv[] = { 8, 12, 16, 20, 24, 32, 36 };
+	struct pt_gpr g;
+	siginfo_t si;
+	uint64_t p, l;
+	int sig, steps = 0, codes = 0, svc = 0, loop = 0, handler = 0, rc;
+	pid_t pid = fork();
+
+	if (pid == 0)
+		pt_step_child();
+	if (pt_wait(pid) != SIGTRAP || pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) ||
+	    pt_peek32(pid, g.pc) != PT_BRK(1))
+		goto out;
+	p = g.pc;
+	g.pc = p + 4;
+	pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	/* One instruction a step; the SVC's step stops at its exit, with getpid's result. */
+	for (int i = 0; i < 7; i++) {
+		if (pt_cont(PTRACE_SINGLESTEP, pid, 0) != SIGTRAP ||
+		    pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) ||
+		    ptrace(PTRACE_GETSIGINFO, pid, 0, &si) || g.pc != p + adv[i])
+			break;
+		if (adv[i] == 20)
+			svc = g.x[0] == (uint64_t)pid && g.x[9] == 2;
+		else
+			codes += si.si_code == TRAP_TRACE && (uint64_t)si.si_addr == g.pc;
+		steps++;
+	}
+	if (steps != 7)
+		goto out;
+	/* BRK #3, then past it to BRK #4 after the compiled loop. */
+	if (pt_cont(PTRACE_CONT, pid, 0) != SIGTRAP || pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) ||
+	    g.pc != p + 36)
+		goto out;
+	g.pc += 4;
+	pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	if (pt_cont(PTRACE_CONT, pid, 0) != SIGTRAP || pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) ||
+	    pt_peek32(pid, g.pc) != PT_BRK(4))
+		goto out;
+	/* Three passes of the loop again, one step at a time. */
+	l = g.pc - 12;
+	g.pc = l;
+	g.x[9] = 0;
+	g.x[10] = 3;
+	pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	loop = 1;
+	for (int i = 0; i < 9; i++) {
+		uint64_t want = i == 8 ? l + 12 : l + 4 * ((i + 1) % 3);
+
+		if (pt_cont(PTRACE_SINGLESTEP, pid, 0) != SIGTRAP ||
+		    pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) != sizeof(g) || g.pc != want)
+			loop = 0;
+		if (!loop)
+			break;
+	}
+	loop = loop && g.x[9] == 3;
+	/* Past BRK #4 and BRK #5, a step with SIGUSR1 stops at the handler's first instruction. */
+	g.pc = l + 20;
+	pt_regset(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g, sizeof(g));
+	sig = pt_cont(PTRACE_SINGLESTEP, pid, SIGUSR1);
+	handler = sig == SIGTRAP && pt_regset(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g, sizeof(g)) == sizeof(g) &&
+		  g.pc == (uintptr_t)pt_on_usr1;
+	rc = pt_finish(pid);
+	CHECK(codes == 6 && svc && loop && handler && rc == 0,
+	      "ptrace single-step: 7 steps, %d/6 TRAP_TRACE, SVC at its exit %s, compiled loop %s, into handler %s, child %#x",
+	      codes, svc ? "ok" : "BAD", loop ? "ok" : "BAD", handler ? "ok" : "BAD", rc);
+	return;
+out:
+	CHECK(0, "ptrace single-step: broken after %d steps (child %#x)", steps, pt_reap(pid, 1));
+}
+
+/*
+ * A core dump: a child with x19 = PT_A dies of SIGTRAP at a BRK in /tmp
+ * (core_pattern "core"); the file is an aarch64 ET_CORE whose notes hold
+ * NT_PRSTATUS (x19, pc at the BRK, EL0t), NT_PRFPREG and NT_ARM_TLS.
+ */
+static void core_checks(void)
+{
+	static unsigned char buf[1 << 16];
+	Elf64_Ehdr *eh = (Elf64_Ehdr *)buf;
+	int status, fd, notes = 0, x19 = 0, pc = 0, fp = 0, tls = 0;
+	ssize_t n = 0;
+	pid_t pid;
+
+	unlink("/tmp/core");
+	pid = fork();
+	if (pid == 0) {
+		struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+
+		if (setrlimit(RLIMIT_CORE, &rl) || chdir("/tmp"))
+			_exit(1);
+		__asm__ volatile("mov x19, %0\n\tbrk #11" : : "r"(PT_A) : "x19", "memory");
+		_exit(2);
+	}
+	waitpid(pid, &status, 0);
+	fd = open("/tmp/core", O_RDONLY);
+	if (fd >= 0) {
+		n = read(fd, buf, sizeof(buf));
+		close(fd);
+	}
+	if (n >= (ssize_t)sizeof(*eh) && !memcmp(buf, ELFMAG, SELFMAG) && eh->e_type == ET_CORE &&
+	    eh->e_machine == EM_AARCH64 && eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(Elf64_Phdr) <= (uint64_t)n) {
+		Elf64_Phdr *ph = (Elf64_Phdr *)(buf + eh->e_phoff);
+
+		for (int i = 0; i < eh->e_phnum; i++) {
+			uint64_t off = ph[i].p_offset, end = off + ph[i].p_filesz;
+
+			if (ph[i].p_type != PT_NOTE || end > (uint64_t)n)
+				continue;
+			while (off + sizeof(Elf64_Nhdr) <= end) {
+				Elf64_Nhdr *nh = (Elf64_Nhdr *)(buf + off);
+				uint64_t d = off + sizeof(*nh) + ((nh->n_namesz + 3) & ~3u);
+				const uint64_t *reg = (const uint64_t *)(buf + d + 112);	/* elf_prstatus pr_reg */
+
+				if (d + nh->n_descsz > end)
+					break;
+				notes++;
+				if (nh->n_type == NT_PRSTATUS && nh->n_descsz >= 112 + 34 * 8) {
+					x19 = reg[19] == PT_A;
+					/* The BRK is in this function (the same address after fork). */
+					pc = reg[32] > (uintptr_t)core_checks && reg[32] < (uintptr_t)core_checks + 4096 &&
+					     (reg[33] & 0xf) == 0;
+				}
+				fp |= nh->n_type == NT_PRFPREG && nh->n_descsz == sizeof(struct pt_fpr);
+				tls |= nh->n_type == NT_ARM_TLS && nh->n_descsz == 16;
+				off = d + ((nh->n_descsz + 3) & ~3u);
+			}
+		}
+	}
+	unlink("/tmp/core");
+	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGTRAP && WCOREDUMP(status) && x19 && pc && fp && tls,
+	      "core dump: SIGTRAP %s, core file %zd bytes, %d notes: NT_PRSTATUS %s, NT_PRFPREG %s, NT_ARM_TLS %s",
+	      WIFSIGNALED(status) && WCOREDUMP(status) ? "dumped" : "BAD", n, notes, x19 && pc ? "ok" : "BAD",
+	      fp ? "ok" : "BAD", tls ? "ok" : "BAD");
+}
+
+static void ptrace_checks(void)
+{
+	pt_regs_checks();
+	pt_syscall_checks();
+	pt_poke_checks();
+	pt_step_checks();
+	core_checks();
+}
+
 /*
  * rtnetlink requests for net_config_checks: attributes appended to a
  * buffer (without data: a nest, or room that the caller fills).
@@ -2012,6 +2648,39 @@ static void *ua_wakeop(void *arg)
 		syscall(SYS_futex, &ua_dummy, FUTEX_WAKE_OP_PRIVATE, 0, 0, &ua_word,
 			FUTEX_OP(FUTEX_OP_ADD, 1, FUTEX_OP_CMP_EQ, 0));
 	return NULL;
+}
+
+/*
+ * The user address space is 48 bits (four page-table levels): a reservation
+ * larger than 39 bits fits, and a page in the upper half is reached by user
+ * code (kwemu's walk) and by the kernel (the uaccess walk).
+ */
+static void vaspace_checks(void)
+{
+	size_t big = (4UL << 40) + (32UL << 30);
+	char *high = (char *)((1UL << 47) + (5UL << 39) + (3UL << 30) + (7UL << 21));
+	void *r = mmap(NULL, big, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+	void *over = mmap((void *)(1UL << 48), 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	char *p = mmap(high, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	int fds[2], user = 0, kernel = 0;
+
+	if (r != MAP_FAILED)
+		munmap(r, big);
+	if (p == high) {
+		memset(p, 0x5a, 4096);
+		user = p[0] == 0x5a && p[4095] == 0x5a;
+		if (!pipe(fds)) {
+			kernel = write(fds[1], p, 4096) == 4096 && read(fds[0], p + 4096, 4096) == 4096 &&
+				 !memcmp(p, p + 4096, 4096);
+			close(fds[0]);
+			close(fds[1]);
+		}
+		munmap(p, 8192);
+	}
+	CHECK(r != MAP_FAILED && over == MAP_FAILED && p == high && user && kernel,
+	      "address space: 4 TiB reservation %s, nothing at 1 << 48 %s, a page above 1 << 47: mapped %s, user %s, kernel %s",
+	      r != MAP_FAILED ? "ok" : "BAD", over == MAP_FAILED ? "ok" : "BAD", p == high ? "ok" : "BAD",
+	      user ? "ok" : "BAD", kernel ? "ok" : "BAD");
 }
 
 static void uaccess_checks(void)
@@ -4075,8 +4744,11 @@ int main(int argc, char **argv)
 
 #ifdef __aarch64__
 	config_checks();
+	seccomp_checks();
+	ptrace_checks();
 	net_config_checks();
 	uaccess_checks();
+	vaspace_checks();
 	input_handler_checks();
 	vsock_checks();
 	ninep_checks();

@@ -45,6 +45,12 @@
 # render in software, as everywhere without the node). A relay started
 # before the node existed keeps rendering them in software: kill it
 # (pkill -x wlandr) to start one that takes them, which ends its apps.
+#
+# Vulkan apps: with a relay that has --external-buffers (its --version
+# lists external-buffers) the kw ICD presents each frame by naming the
+# swapchain image, which the page's Vulkan renderer shows without reading
+# it back, where the page offers that; else, and on other compositors,
+# by copying the frame into a wl_shm buffer.
 
 bb=/run/kw-lower/bin/busybox
 relay=/usr/lib/kw/wlandr
@@ -82,6 +88,9 @@ start() {
 		# The page's renderer gets a GL client's work before the relay's commit (one channel).
 		has no-fence-wait && flags="$flags --no-fence-wait"
 	fi
+	# Vulkan apps (the kw ICD) name their swapchain images instead of sending
+	# pixels, where the relay can and the page's Vulkan renderer resolves them.
+	has external-buffers && flags="$flags --external-buffers"
 	XDG_RUNTIME_DIR=$dir $bb setsid $relay --link $link --buffers kwshm $flags --display "$disp" \
 		</dev/null >"$dir/wlandr.log" 2>&1 &
 	pid=$!

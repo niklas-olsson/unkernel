@@ -56,17 +56,19 @@
   with `vm_map_ram`/`vmap`, which VMALLOC_FLAT cannot, so lz4 files read
   as ENOMEM and an lz4 image with big pclusters (`mkfs.erofs -C`) does
   not mount. microLZMA is off (+21 KB, +8 KB gzip).
+- COREDUMP (ELF_CORE follows): the notes come from the ptrace regsets
+  (`CORE_DUMP_USE_REGSET`, as arm64), so `gdb prog core` works; +23.5 KB
+  lowered (8,553,809 to 8,577,327 bytes), +9.1 KB gzip, +25 KB wasm64,
+  4 KiB of RAM, no new imports (2026-11-23).
 - `FRAME_WARN=3072`: clang's wasm backend gives each variadic call its own
   16-byte stack slot (`snmp_seq_show` 2304 bytes, all others under 1024).
   The kernel builds without warnings; keep it that way.
 
 ## What is off
 
-- No netfilter. BPF_SYSCALL, KEYS, IPV6, SECCOMP, modules, swap and
-  kallsyms are off.
-- COREDUMP must stay off until the arch has `elf_core_copy_task_fpregs` and
-  arm64 core notes (the registers from kwemu): without them a fault with a
-  core limit is a wasm trap.
+- No netfilter. BPF_SYSCALL, KEYS, IPV6, modules, swap and kallsyms are
+  off. SECCOMP and SECCOMP_FILTER are on (filters run on the BPF
+  interpreter; syscalls a filter always allows skip it).
 - IKCONFIG/IKCONFIG_PROC: clang crashes on `kernel/configs.o`.
 
 Measured 2026-11-14, one per build (base `vmlinux32.wasm` 6.83 MB raw,

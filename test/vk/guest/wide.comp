@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// 512 invocations per workgroup, as ggml uses: over WebGPU limits of 256
+// the translator shrinks the workgroup and the host scales the dispatch.
+layout(local_size_x = 512) in;
+layout(push_constant) uniform P { uint n; } p;
+layout(set = 0, binding = 0) buffer B { float v[]; } b;
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i < p.n) b.v[i] *= 2.0;
+}

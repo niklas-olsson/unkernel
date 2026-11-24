@@ -201,8 +201,11 @@ fn isDead(e: *Emit, at: At) bool {
 }
 
 /// A live producer set the lazy state: materialise NZCV at once when its
-/// flags reach the member's end (every way out would need them) and the
-/// block is not its own loop (whose back edge may skip them, `head_dead`).
+/// flags reach the member's end (every way out would need them), unless the
+/// block is compiled as its own loop (whose back edge may skip them,
+/// `head_dead`). A self-loop that is a region's guest materialises them as
+/// every member does: with lazy flags there, the A64 block fuzz found a stale
+/// NZCV written back (seed 12899, KWEMU_JIT_SIMD=0).
 fn produced(e: *Emit, at: At, kind: Kind, bk: ?u64, ccmp: bool, def: u4) void {
     e.x.alu.kind = kind;
     e.x.alu.bk = bk;
@@ -210,7 +213,7 @@ fn produced(e: *Emit, at: At, kind: Kind, bk: ?u64, ccmp: bool, def: u4) void {
     e.x.alu.def = def;
     e.x.alu.synced = kind == .exact;
     const last = at.k < 64 and e.x.alu.last & (@as(u64, 1) << @intCast(at.k)) != 0;
-    if (last and !at.self_loop and !e.x.alu.synced) {
+    if (last and (!at.self_loop or e.rg != null) and !e.x.alu.synced) {
         e.site = 3;
         materialise(e);
         e.set(cm.l_nzcv);

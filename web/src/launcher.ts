@@ -142,6 +142,7 @@ export function unavailable(d: AppDef): string | null {
 	if (d.needs?.display && !KW.config.display) return "needs the display (off with ?display=0)";
 	if (d.needs?.net && !KW.config.net) return "needs the network (off with ?net=0)";
 	if (d.needs?.sound && !KW.config.sound) return "needs sound (off with ?sound=0)";
+	if (d.needs?.vk && !KW.config.vk) return `needs guest Vulkan (${KW.config.vkWhy ?? "off in Settings, Display and sound"})`;
 	if (d.needs?.wayland && KW.vm && !ui$().get().wayland.available) return "needs the Wayland desktop: this boot has no kwshm (?shm=0, or a session resumed from before the desktop)";
 	const on = appDistros(d);
 	const g = KW.config.guest;

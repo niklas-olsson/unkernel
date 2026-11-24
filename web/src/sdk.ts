@@ -10,7 +10,7 @@
 import { createKernelOn, type CreateKernelOptions, type KernelHandle, type KernelInstance, type WorkerOption } from "../../js/core/instance.ts";
 import type { WorkerKernel } from "../../js/core/worker-host.ts";
 import { webPlatform } from "../../js/web/platform.ts";
-import { glUrl, kernelSmpUrl, kernelUrl } from "virtual:unkernel-kernel";
+import { glUrl, kernelSmpUrl, kernelUrl, vkShaderUrl } from "virtual:unkernel-kernel";
 
 export * from "../../js/core/index.ts";
 export { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB } from "../../js/web/memory.ts";
@@ -35,7 +35,21 @@ export { kernelSmpUrl, kernelUrl };
  */
 export { glUrl };
 
-const platform = webPlatform(kernelUrl, glUrl ?? undefined);
+/**
+ * The guest Vulkan renderer's SPIR-V to WGSL translator (kwvk-naga.wasm), or
+ * null when the page's build has none: with createKernel({ vk }) (the Vulkan
+ * option, config.ts) the SDK fetches it, and imports the renderer's modules
+ * (chunks of their own), only at the guest's first Vulkan instance.
+ */
+export { vkShaderUrl };
+
+const platform = webPlatform(kernelUrl, glUrl ?? undefined, vkShaderUrl ? {
+	shaderWasm: vkShaderUrl,
+	load: async () => {
+		const [host, shader] = await Promise.all([import("../../js/core/vk-host.ts"), import("../../js/core/vk-shader.ts")]);
+		return { VkRenderer: host.VkRenderer, loadVkShader: shader.loadVkShader as (wasm: never) => Promise<unknown> };
+	},
+} : undefined);
 
 /**
  * js/web.ts's createKernel(), with the page's kernel as the default; with

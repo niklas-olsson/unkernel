@@ -69,7 +69,7 @@ pub const enabled = options.jit and builtin.cpu.arch == .wasm64;
 /// Table slots (stub functions) owned by kwemu.
 pub const npool = 1024;
 /// Module emit buffer.
-pub const buf_size = 16 * 1024;
+pub const buf_size = 32 * 1024;
 /// Largest `jl` passed in (keeps `jl << 8` in 63 bits).
 pub const max_jl: u64 = 1 << 55;
 /// Result codes (low 8 bits of `enter`'s result): below code_done, op k
@@ -802,8 +802,8 @@ pub const Error = error{ Unsupported, Overflow };
 // (`I.targets`) that are already decoded, valid under their page's current
 // fill and not compiled elsewhere, on any page, in breadth-first order.
 // They grow later along hot exits (`noteHot`): a block compiled in another
-// region, on another page, that `run` often enters right after the region
-// left joins it as a guest. A member that is re-decoded only loses its own
+// region (a self-loop's own module included), on any page, that `run`
+// often enters right after the region left joins it as a guest. A member that is re-decoded only loses its own
 // entry (`dropMember`); copies of it in other regions fail the op check
 // from then on. A region is freed when no home member is left (a member
 // re-decoded, or its ops dropped from the tenured ring), when the clock
@@ -1162,8 +1162,11 @@ pub fn Jit(comptime I: type) type {
             /// says so or when the budget does not cover another pass, else
             /// charge the pass and branch to the loop head. The self-loop's
             /// `loop` is the innermost open block when this is emitted at the
-            /// terminator's top level (`I.emitOp` with self_loop).
+            /// terminator's top level (`I.emitOp` with self_loop). In a region
+            /// (a self-loop that joined one as a guest) it is the branch to the
+            /// running member's own start (`toMember`), whose loop is `rg.self`.
             pub fn backEdge(e: *Emit, b: *const Block) void {
+                if (e.rg) |rg| return e.toMember(rg, rg.cur);
                 I.poll(e);
                 e.get(l_jl);
                 e.k64(b.ninsn);
@@ -1407,29 +1410,30 @@ pub fn Jit(comptime I: type) type {
         /// `run` must look b up again (`windowClose`).
         pub inline fn noteExit(cpu: *Cpu, s: u32, b: *Block) bool {
             if (b.jx.st < compiled or b.jx.st & slot_mask == s) return false;
+            // noteHot's first test, inline: most such exits leave closed regions.
+            if (cpu.priv.jit.page[s] & page_closed != 0) return false;
             return noteHot(cpu, s, b);
         }
 
-        /// Region growth along hot exits: a block compiled in another region, on
-        /// another page than the region's own, that `run` entered `grow_threshold`
-        /// times per KiB of the region's module right after a region left towards
-        /// it, joins the region that left last as a guest member (it keeps its own
-        /// module, which `run` still enters). Calls, returns and jumps into other
-        /// pages (libc, PLT stubs, functions that span pages) then stay inside one
-        /// module. Targets on the region's own page are left to `findRegion`, and
-        /// closed or full regions and self-loops (which keep their own module) are
-        /// left alone: in measurements, growing towards those cost more in compiles
-        /// than the exits it saved.
+        /// Region growth along hot exits: a block compiled in another region
+        /// (on any page, the region's own included) that `run` entered
+        /// `grow_threshold` times per KiB of the region's module right after a
+        /// region left towards it, joins the region that left last as a guest
+        /// member (it keeps its own module, which `run` still enters). Calls,
+        /// returns and jumps into other pages (libc, PLT stubs, functions that
+        /// span pages), blocks of the page compiled into other modules, and
+        /// self-loops entered from the region (their module stays their home)
+        /// then stay inside one module. Closed or full regions are left alone
+        /// (`noteExit` tests closed ones before the call).
         noinline fn noteHot(cpu: *Cpu, s: u32, b: *Block) bool {
             const st = &cpu.priv.jit;
             // Called on every such exit: only the cheap tests before counting.
-            if (st.page[s] & page_closed != 0 or b.pc >> 12 == st.page[s]) return false;
+            if (st.page[s] & page_closed != 0) return false;
             b.jx.hits += 1;
             // A grow recompiles the whole region: the bigger it is, the more exits
             // it takes (grow_threshold per KiB of module).
             if (b.jx.hits < st.grow_threshold *| @max(1, st.size[s] >> 10)) return false;
             b.jx.hits = 0;
-            if (selfLoop(cpu, b)) return false;
             // Already a member with this decode: the region stopped before it
             // (budget, interrupt, a page revalidated since).
             const me = blockIndex(cpu, b) + 1;
@@ -1452,9 +1456,11 @@ pub fn Jit(comptime I: type) type {
             return windowClose(cpu) or b.op == kwemu.op_gone;
         }
 
-        /// A decoded block that may be a region member.
+        /// A decoded block that may be a region member: a self-loop only as a
+        /// guest (compiled in its own module).
         fn usable(cpu: *Cpu, b: *const Block) bool {
-            return b.pc != std.math.maxInt(u64) and b.op != kwemu.op_gone and I.supported(I.ops(cpu, b)[0]) and !selfLoop(cpu, b);
+            return b.pc != std.math.maxInt(u64) and b.op != kwemu.op_gone and I.supported(I.ops(cpu, b)[0]) and
+                (b.jx.st >= compiled or !selfLoop(cpu, b));
         }
 
         /// A pass through `b` is about to run: whether it runs compiled. Counts the
@@ -1780,9 +1786,12 @@ pub fn Jit(comptime I: type) type {
             e.set(l_cur);
             e.open(W.loop, W.void_t);
             rg.self = e.nest;
+            // A self-loop (a guest: its home is a module of its own) branches
+            // back to its start through `backEdge`, as in that module.
+            const self_loop = u == all.len and I.selfLoop(all[all.len - 1], b);
             var pc = b.pc;
             for (all[0..u], 0..) |o, k| {
-                I.emitOp(e, o, k, pc, b, false);
+                I.emitOp(e, o, k, pc, b, self_loop);
                 pc = I.nextPc(o, pc);
             }
             if (u < all.len) {

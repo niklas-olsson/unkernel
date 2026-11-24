@@ -82,7 +82,7 @@ pub const Machine = struct {
     }
     fn slot(m: *Machine, va: u64) *u64 {
         var tb = m.root;
-        var level: u6 = 2;
+        var level: u6 = 3;
         while (level > 0) : (level -= 1) {
             const e = &m.tbl(tb)[@intCast((va >> (12 + 9 * level)) & 511)];
             if (e.* & V == 0) e.* = ((m.frame() >> 12) << 10) | V;
@@ -90,7 +90,7 @@ pub const Machine = struct {
         }
         return &m.tbl(tb)[@intCast((va >> 12) & 511)];
     }
-    /// Map the page at `va` to `pa` with Sv39 flags (R, W, X; U, A, D and V
+    /// Map the page at `va` to `pa` with Sv48 flags (R, W, X; U, A, D and V
     /// are added).
     pub fn map(m: *Machine, va: u64, pa: u64, prot: u64) void {
         m.slot(va).* = ((pa >> 12) << 10) | prot | U | A | D | V;

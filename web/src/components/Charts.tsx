@@ -16,9 +16,10 @@
 // - Meter: a thin bar of one whole split into parts (memory: in use, cache,
 //   free), with its parts' names and values in its accessible name.
 // - Bars: one small vertical bar per value (each CPU's share).
-// Colours: one per resource (TONE: CPU, memory, disk, network, GPU), the
-// same in the Overview and the popover, for the main series; the muted gray
-// for a second one; amber and red only for a meter that is nearly full.
+// Colours: one per resource (TONE: CPU, memory, disk, network, GPU (guest
+// GL), Vulkan), the same in the Overview and the popover, for the main
+// series; the muted gray for a second one; amber and red only for a meter
+// that is nearly full.
 import { useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
 import { agoSeconds } from "../format.ts";
 import { GAP, INTERVAL, RING, type Point } from "../stats.ts";
@@ -40,6 +41,7 @@ export const TONE = {
 	disk: "#3fcfb4",
 	net: "#ff8ac6",
 	gpu: "#e6c84f",
+	vk: "#f0905a",
 } as const;
 /** The second series of a chart (out, write). */
 export const SECOND = "var(--color-muted)";

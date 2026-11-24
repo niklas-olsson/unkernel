@@ -26,9 +26,12 @@
 //   use (#tb-mem: a memory module); from sm up also the data disk (#tb-disk:
 //   a cylinder), the network (#tb-net: a globe and two bars, received and
 //   sent, on a log scale from NET_LO to NET_HI B/s; the globe struck through
-//   when it is off) and, while guest GL's renderer is loaded, the GPU
-//   (#tb-gpu: a graphics card, the bar the renderer's share of the page's
-//   time). Last, at the far right, the Control Center (#tb-status: two
+//   when it is off) and, while guest GL's or guest Vulkan's renderer is
+//   loaded, the GPU (#tb-gpu: a graphics card, the bar the share of the
+//   page's time the two renderers took together; its tooltip has each
+//   one's frame rate and share, and Vulkan's instances, errors and device
+//   losses; it marks both GPU rows in Resources). Last, at the far right,
+//   the Control Center (#tb-status: two
 //   switches in the state's colour, red on an error, dim once halted, green
 //   while suspended, style.css; #tb-status-label is the state's name), which
 //   opens its popover (ControlCenter.tsx, #tb-cc: the state and uptime, quick
@@ -66,7 +69,7 @@ import { windowItems } from "../winmenu.tsx";
 import { useWm, type WmWindow } from "../wm.ts";
 import { BootSlot } from "./BootIndicator.tsx";
 import { ControlCenter, ResourcesPopover, type CcClose } from "./ControlCenter.tsx";
-import { GPU_STATE, type ResKey } from "./Glance.tsx";
+import { GPU_STATE, VK_STATE, vkTrouble, type ResKey } from "./Glance.tsx";
 import { ControlIcon, CpuIcon, DiskIcon, ErrIcon, GpuIcon, Mark, MetaIcon, NetIcon, RamIcon } from "./icons.tsx";
 import { KeyHint, withKey } from "./KeyHint.tsx";
 import { Menu, type MenuClose, type MenuEntry } from "./Menu.tsx";
@@ -227,11 +230,21 @@ export function TopBar() {
 	const last = st.points[st.points.length - 1];
 	const glBusy = gpu && !st.idle ? last?.glBusy ?? null : null;
 	const fps = gpu?.device && !st.idle ? last?.fps ?? null : null;
+	const vk = st.vk?.state === "ready" || st.vk?.state === "lost" ? st.vk : null;
+	const vkBusy = vk && !st.idle ? last?.vkBusy ?? null : null;
+	const vkFps = vk && !st.idle ? last?.vkFps ?? null : null;
+	// The GPU meter: both renderers' share of the page's time (each is time on the page's thread).
+	const gpuBusy = glBusy == null && vkBusy == null ? null : Math.min(1, (glBusy ?? 0) + (vkBusy ?? 0));
 	const why = st.idle ? `not sampled (${st.idle})` : "waiting for the guest";
 	const cpuText = cpu != null ? `CPU ${pct(cpu)}${load ? ` · load ${load.one.toFixed(2)}` : ""}${ncpu > 1 ? ` · ${ncpu} CPUs` : ""}` : g ? "CPU: measuring…" : `CPU: ${why}`;
 	const memText = mem ? `Memory ${mib(mem.used)} of ${mib(mem.total)} MiB in use (${pct(memShare ?? 0)})` : `Memory: ${why} (kernel memory ${kmem} MiB)`;
 	const netText = !net ? "Network: off" : rx != null && tx != null ? `Network ↓ ${fmtRateShort(rx)} · ↑ ${fmtRateShort(tx)}` : `Network: on; ${why}`;
-	const gpuText = gpu ? `GPU (guest GL): ${gpu.state === "ready" ? `${fps != null ? `${fmtFps(fps)} · ` : ""}renderer ${glBusy != null ? fmtPct(glBusy) : "–"} of the page's time` : GPU_STATE[gpu.state]}` : "";
+	const vkBad = vk && vkTrouble(vk);
+	const gpuText = [
+		gpu && `GPU (guest GL): ${gpu.state === "ready" ? `${fps != null ? `${fmtFps(fps)} · ` : ""}renderer ${glBusy != null ? fmtPct(glBusy) : "–"} of the page's time` : GPU_STATE[gpu.state]}`,
+		vk && `Vulkan: ${vk.state === "ready" ? `${vkFps != null && vkFps > 0 ? `${fmtFps(vkFps)} · ` : ""}${vk.connections} instance${vk.connections === 1 ? "" : "s"} · renderer ${vkBusy != null ? fmtPct(vkBusy) : "–"} of the page's time` : VK_STATE[vk.state]}` +
+			`${vkBad?.errors ? ` · ${vkBad.errors} error${vkBad.errors === 1 ? "" : "s"}` : ""}${vkBad?.losses ? ` · device lost ${vkBad.losses}×` : ""}`,
+	].filter(Boolean).join("\n");
 
 	const bar = useRef<HTMLElement>(null);
 	/** In the bar, or in a menu or a popover (Menu.tsx and ControlCenter.tsx render them in <body>). */
@@ -282,11 +295,11 @@ export function TopBar() {
 		if (back?.isConnected && back !== document.body) back.focus({ preventScroll: true });
 	};
 	// The meter it marks went (the GPU's renderer was dropped): no row marked.
-	if (pop?.res === "gpu" && !gpu) setPop({ ...pop, res: null });
+	if (pop?.res === "gpu" && !gpu && !vk) setPop({ ...pop, res: null });
 	/** The bar's controls that open a popover: a press on one does not close the open one (its click toggles or switches). */
 	const onPopControl = (t: EventTarget | null) => !!(t as Element | null)?.closest?.("[data-pop]");
 	/** Resources opens under the last meter shown (from sm up; under sm it is a sheet). */
-	const resAnchor = gpu ? "tb-gpu" : "tb-net";
+	const resAnchor = gpu || vk ? "tb-gpu" : "tb-net";
 	const ccOn = pop?.view === "cc";
 
 	// ---- menus ----
@@ -332,9 +345,9 @@ export function TopBar() {
 				<ResButton res="net" open={pop?.view === "res" && pop.res === "net"} className={`tb-wide ${net ? "" : "tb-off"}`} title={netText} label={netText} onToggle={toggleRes} onHover={hoverRes}>
 					<NetIcon off={!net} size={14} />{net && <Bars values={[netLevel(rx), netLevel(tx)]} />}
 				</ResButton>
-				{gpu && (
+				{(gpu || vk) && (
 					<ResButton res="gpu" open={pop?.view === "res" && pop.res === "gpu"} className="tb-wide" title={gpuText} label={gpuText} onToggle={toggleRes} onHover={hoverRes}>
-						<GpuIcon size={14} /><Bars values={[glBusy]} />
+						<GpuIcon size={14} /><Bars values={[gpuBusy]} />
 					</ResButton>
 				)}
 				<button id="tb-status" type="button" title={ccOn ? undefined : `Control Center: ${label}`}

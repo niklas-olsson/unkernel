@@ -97,15 +97,53 @@ function realtimeNs(): bigint {
 }
 
 
+/**
+ * Browsers raise a nested setTimeout() below 4 ms to 4 ms (about 5 ms between
+ * wakes, measured in Chrome and Safari workers, 2026-11-24), and an idle
+ * kernel's timers are nested: it resumes in the timer's own task. A timed
+ * Atomics.waitAsync() is not raised (about 2.5 ms for 2 ms), so short idle
+ * waits also wait on this word, which nothing changes. Null where a
+ * SharedArrayBuffer or waitAsync is missing (a page that is not cross-origin
+ * isolated): those wake late.
+ */
+let shortWaitWord: Int32Array | null | undefined;
+const SHORT_WAIT_MS = 4;
+
+function shortWait(done: () => void, ms: number): void {
+	if (shortWaitWord === undefined) {
+		try {
+			shortWaitWord = typeof Atomics.waitAsync === "function" ? new Int32Array(new SharedArrayBuffer(4)) : null;
+		} catch {
+			shortWaitWord = null;
+		}
+	}
+	if (!shortWaitWord) return;
+	const r = Atomics.waitAsync(shortWaitWord, 0, 0, ms);
+	if (r.async) void r.value.then(done);
+}
+
+type RefPort = MessagePort & { ref?: () => void; unref?: () => void };
+let yieldChannel: MessageChannel | undefined;
+/** Waiting yields, oldest first: one message, so one task, each (as with a channel per yield). */
+const yieldWaiters: (() => void)[] = [];
+
 export function yieldToEventLoop(): Promise<void> {
 	if (typeof setImmediate === "function") return new Promise((r) => setImmediate(r));
-	return new Promise((r) => {
+	if (!yieldChannel) {
 		const ch = new MessageChannel();
-		ch.port1.onmessage = () => {
-			ch.port1.close();
-			r();
+		const port1 = ch.port1 as RefPort;
+		port1.onmessage = () => {
+			const r = yieldWaiters.shift();
+			if (!yieldWaiters.length) port1.unref?.();
+			r?.();
 		};
-		ch.port2.postMessage(0);
+		port1.unref?.();
+		(ch.port2 as RefPort).unref?.();
+		yieldChannel = ch;
+	}
+	return new Promise((r) => {
+		if (yieldWaiters.push(r) === 1) (yieldChannel!.port1 as RefPort).ref?.();
+		yieldChannel!.port2.postMessage(0);
 	});
 }
 
@@ -478,6 +516,7 @@ export class WasiHost {
 					};
 					k.idleWake = done;
 					if (wait !== Infinity) timer = setTimeout(done, Math.max(0, wait));
+					if (wait >= 1 && wait < SHORT_WAIT_MS) shortWait(done, wait);
 					// SMP: an IPI from another CPU (a change of wasm_host_irqs).
 					k.watchIrqWord(done, wait === Infinity ? 60000 : Math.max(0, wait));
 				});

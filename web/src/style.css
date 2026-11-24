@@ -624,6 +624,31 @@
 #dock-label > span:empty { display: none; }
 #app.compact #dock-label { display: none; }
 @media (prefers-reduced-motion: reduce) { #dock-label[data-show] { transition: none; } }
+/* A group's stack (DockStack.tsx #dock-stack, in <body>), as a macOS Dock
+   stack: a rounded panel of the Dock's glass (its edge, sheen, blur and
+   shadows) under the HUD's darker tint, so the names read over a busy
+   terminal, and a notch under it pointing at the tile (--notch: its middle
+   from the panel's left), the same tint and blur of its own, its slanted
+   edges drawn by its svg. Both grow out of the notch's tip with a short
+   spring (scale and fade); not when it replaces another stack (data-quick),
+   nor with reduced motion (the last rule of this file). */
+.dock-stack-panel {
+	border: 1px solid; border-color: var(--glass-border); border-radius: 18px;
+	background: var(--glass-sheen), var(--hud-bg);
+	-webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+	box-shadow: var(--glass-shadow);
+	transform-origin: var(--notch) calc(100% + 8px);
+}
+.dock-stack-notch {
+	position: absolute; top: calc(100% - 1px); left: calc(var(--notch) - 9px); width: 18px;
+	clip-path: polygon(0 0, 100% 0, 50% 100%);
+	background: var(--hud-bg); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+	transform-origin: 50% 100%;
+}
+.dock-stack-notch > svg { display: block; width: 100%; height: 100%; fill: none; stroke: rgb(255 255 255 / 11%); stroke-width: 2; }
+.dock-stack-panel, .dock-stack-notch { animation: dock-stack-in .26s cubic-bezier(.3, 1.3, .55, 1) both; }
+.dock-stack[data-quick] > * { animation: none; }
+@keyframes dock-stack-in { from { opacity: 0; transform: scale(.35); } 45% { opacity: 1; } }
 /* An app being installed (installer.ts): a thin bar over the bottom of its
    tile's face, the Dock's (Dock.tsx) and the launcher's (Launcher.tsx), as
    macOS draws a download on its Dock icon; white, red once failed, a

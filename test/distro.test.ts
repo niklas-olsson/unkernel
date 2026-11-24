@@ -328,6 +328,9 @@ ENTRY`);
 			vm.write("\necho \"con-$(id -un)-$(pwd)-$((6*7))\"\n");
 			for (let i = 0; i < 600 && !/con-\w+-\S+-42/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
 			assert.match(out, new RegExp(`con-user-${HOME}-42`));
+			vm.write("\ngrep SigIgn /proc/self/status\n");
+			for (let i = 0; i < 600 && !/SigIgn:\s+\w{16}/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
+			assert.match(out, /SigIgn:\s+0{16}/, "the console's programs do not ignore ^C");
 			await poweroff(vm);   // as the user: poweroff goes through sudo
 			const vm2 = await boot(t, { distro: img!.file, cmdline: `${bundled!.cmdline} kw.user=root` });
 			out = "";

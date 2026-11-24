@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform writeonly image2D img;
+void main() { imageStore(img, ivec2(gl_GlobalInvocationID.xy), vec4(1.0, 0.5, 0.0, 1.0)); }

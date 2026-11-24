@@ -4,7 +4,7 @@
 // ?showcase, in groups that Settings (Settings.tsx) shows in its sections:
 // MachineOptions (CPUs, memory, worker thread, JIT, verbose boot, kernel
 // command line), DistroOptions (distro, safe mode), StorageOptions (data disk),
-// NetworkOptions (Wisp), DisplayOptions (display, guest GL, sound) and
+// NetworkOptions (Wisp), DisplayOptions (display, guest GL, guest Vulkan, sound) and
 // SessionOptions (suspend in the background, ask before closing). Reboot
 // saves them in localStorage and reloads (ui.nextSettings()).
 // Terminal style: on/off options are [x] check boxes, Network and Distro are
@@ -15,7 +15,8 @@
 // than one (config.ts smpBlocker()). Distro (?distro=) lists the page's images and none.
 // Guest GL (?gl=, on by default where the display is) is disabled, unticked, with the reason,
 // where the page cannot offer it (config.ts glBlocker()) or the Distro chosen is not one of
-// GL_DISTROS; its stored value stays.
+// GL_DISTROS; its stored value stays. Guest Vulkan (?vk=, on by default) likewise, where the
+// page cannot offer it (config.ts vkBlocker()) or the Distro chosen is not one of VK_DISTROS.
 // Suspend in the background (?autosuspend=, autosuspend.ts) offers off, at once, 30 s and 5 min,
 // plus a ?autosuspend= of other seconds; this device's default is marked.
 //
@@ -27,7 +28,7 @@
 // values nextSettings() reads.
 import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from "react";
 import { AUTO_SUSPEND_CHOICES, autoSuspendLabel } from "../autosuspend.ts";
-import { DATA_SIZES, DEFAULT_CMDLINE, dataSizeCap, DEFAULT_DISTRO, DISTROS_OFFERED, GL_DISTROS } from "../config.ts";
+import { DATA_SIZES, DEFAULT_CMDLINE, dataSizeCap, DEFAULT_DISTRO, DISTROS_OFFERED, GL_DISTROS, VK_DISTROS } from "../config.ts";
 import { capitalize, fmtSize } from "../format.ts";
 import { KW } from "../kw.ts";
 import { useStore, type Options as Opts } from "../store.ts";
@@ -327,11 +328,16 @@ export function DisplayOptions() {
 	const glOff = cfg.glBlocked ?? (GL_DISTROS.includes(o.distro) ? null : `${GL_DISTROS.join(", ")} only (its Mesa has the virgl driver)`);
 	const glNote = glOff ? `Off: ${glOff}` : cfg.glWhy ? `This boot runs without it: ${cfg.glWhy}`
 		: "guest Mesa on this browser's WebGL2 (virgl), through /dev/dri (virtio-gpu); loaded on first use";
+	// Guest Vulkan: Debian only, and only where the page has the translator and WebGPU.
+	const vkOff = cfg.vkBlocked ?? (VK_DISTROS.includes(o.distro) ? null : `${VK_DISTROS.join(", ")} only`);
+	const vkNote = vkOff ? `Off: ${vkOff}` : cfg.vkWhy ? `This boot runs without it: ${cfg.vkWhy}`
+		: "Vulkan 1.0 in the guest on this browser's WebGPU (kwvk); loaded on first use";
 	return (
 		<OptionsForm>
 			<Checks>
 				<Check id="opt-display" name="display" on="on" off="off" value={o.display} label="Display" note="/dev/fb0 and input devices" />
 				<Check id="opt-gl" name="gl" on="on" off="off" value={o.gl} label="Guest GL" blocked={!!glOff} note={glNote} />
+				<Check id="opt-vk" name="vk" on="on" off="off" value={o.vk} label="Guest Vulkan" blocked={!!vkOff} note={vkNote} />
 				<Check id="opt-sound" name="sound" on="on" off="off" value={o.sound} label="Sound" note="ALSA and /dev/dsp" />
 			</Checks>
 		</OptionsForm>

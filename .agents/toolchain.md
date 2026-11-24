@@ -80,6 +80,7 @@ so is the SHA-256 sum for Binaryen 133; the guest's (the Alpine 3.24.4 aarch64
 minirootfs, Debian, busybox-static, erofs-utils, lz4, zstd) in
 `guest/**/pins.sh` (erofs-utils is patched: `guest/tools/erofs-utils-patches/`,
 data in tar order and the metadata zone in front, for the distro images'
-layout; guest/README.md) (`ALPINE_TARBALL=file` overrides the download). wterm (`@wterm/dom`
+layout; guest/README.md) (`ALPINE_TARBALL=file` overrides the download);
+the Vulkan headers guest Vulkan's ICD builds against in `vk/pins.sh`. wterm (`@wterm/dom`
 0.5.10, Apache-2.0) is an npm dependency of `web/`, pinned exactly and
 locked in `pnpm-lock.yaml` (see web.md).

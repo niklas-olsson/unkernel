@@ -43,7 +43,7 @@ test options (a64.md, Tests).
 What every interpreted instruction goes through; what an op is and how a
 block is shaped is the ISA's (a64/tier.md).
 
-- **MMU.** Walks Sv39-layout page tables (kw_emu.h; independent of the
+- **MMU.** Walks Sv48-layout page tables (kw_emu.h; independent of the
   guest ISA) straight out of linear memory and caches fully permitted
   translations in TLBs inside kw_cpu. It never writes PTEs (A = 0, or D =
   0 on a store, raises KW_EV_FAULT), so the kernel flushes on downgrades.
@@ -173,7 +173,7 @@ so a host must accept a compile into an installed slot. `kw_host_reset`
 same way, sets every block's `jx` back to `never`, asks
 `kw_host_jit_caps` again and resets the cache.
 
-**Emit buffer.** 16 KiB inside `struct kw_cpu`. A module that does not
+**Emit buffer.** 32 KiB inside `struct kw_cpu`. A module that does not
 fit is emitted again with less: fewer region members (the ones found last
 are dropped and the region is closed), then 3/4 of the hot block's ops
 each time. A module that overflowed is never handed to the host.
@@ -202,22 +202,27 @@ to `run`. `cpu.jit.cur` names the member a region left from.
   time, and each compiled the region again to join it), then
   breadth-first the decoded, valid, not-yet-compiled
   blocks reachable through side exits, branch targets and call return
-  sites (the ISA's `targets`), on any page. A self-loop keeps a closed
-  module of its own (as a plain wasm loop it is much faster than as a
-  member, and loops over big arrays hand back on every data-TLB miss,
-  cheap only for a small module). A region cut to fit the buffer is
-  closed, and so is a full one.
+  sites (the ISA's `targets`), on any page. A self-loop's home is a
+  closed module of its own (as a plain wasm loop it is much faster than
+  as a member, and loops over big arrays hand back on every data-TLB
+  miss, cheap only for a small module); it joins other regions only as a
+  guest (growth along exits), where its back edge branches to its own
+  member's `loop` (`backEdge`). A region cut to fit the buffer is closed,
+  and so is a full one.
 - **Growth along exits** (`noteExit`/`noteHot`). After compiled code
-  leaves a region (not a hand-back), `run` checks the block it looks up
-  next. If it is compiled in another region and lies on another page than
-  the region's own, it counts the exit (`hits`). After `grow_threshold`
-  exits per KiB of the leaving region's module, the block joins that
-  region as a guest: the region is emitted again and replaces the old
-  module (if it does not fit, the old one stays, closed). Calls into libc
-  and PLT stubs and functions spanning pages then stay in one module.
-  The threshold is high because an exit through `run` costs only about
-  11 ns more than a member branch, while a grow recompiles the whole
-  region (a few hundred µs); per KiB makes big regions wait longer.
+  leaves an open region (not a hand-back), `run` checks the block it
+  looks up next. If it is compiled in another region (on any page, the
+  region's own included; a self-loop too), it counts the exit (`hits`).
+  After `grow_threshold` exits per KiB of the leaving region's module, the
+  block joins that region as a guest: the region is emitted again and
+  replaces the old module (if it does not fit, the old one stays,
+  closed). Calls into libc and PLT stubs, functions spanning pages,
+  blocks of the page compiled into other modules and self-loops entered
+  from the region then stay in one module. `noteExit` tests the closed
+  bit inline: most exits leave closed regions. A grow recompiles the
+  whole region (a few hundred µs), so the threshold is high and per KiB
+  makes big regions wait longer; a round trip through `run` costs about
+  30 ns (A64, 7-Zip's LZMA, 2026-11-23).
 - **Checked entry** (`checkedEntry`). Every branch into another member m
   goes through m's checked entry: m's `op` is still the op index it was
   compiled from; m is valid under the current exec-TLB fill of its page
@@ -382,8 +387,8 @@ block interpreted that long instead of the ~0.25 ms compiling takes.
 
 ## Measuring
 
-The guest has no perf events, and strace and gdb hang in it (no
-regsets); host-side `perf` works (a64/performance.md, Measuring).
+The guest has no perf events; host-side `perf` works (a64/performance.md,
+Measuring).
 `kernel/build.sh stats` builds a `-Dkwemu-stats` bundle of the UP kernel
 only, so counters come from one CPU and time samples (which need two or
 more) from the regular bundle; the CLI's `--stats` prints its counters
@@ -481,9 +486,10 @@ nothing measurable (`compileMs` rises 2.6x because it now holds V8's
 first-call compile). kwstorm + kwmmstress and kwtlb on 4 CPUs with the
 JIT: no errors, and each CPU still collects what it frees.
 
-**Sizes** (2026-11-18). `struct kw_cpu` with the JIT leaves 28,240 bytes
-of `KW_CPU_SIZE` spare (`jc.State` is 100,992 bytes, `members` and
-`member_op` 64 KiB at 16 members, every block carries an 8-byte `jx`):
+**Sizes** (2026-11-23). `struct kw_cpu` with the JIT leaves 11,840 bytes
+of `KW_CPU_SIZE` spare, 3,312 in a `-Dkwemu-stats` build (`jc.State` is
+117,376 bytes, of them the 32 KiB emit buffer and `members` and
+`member_op` 64 KiB at 16 members; every block carries an 8-byte `jx`):
 check the headroom before growing JIT tables.
 
 ## Rejected designs
@@ -502,17 +508,16 @@ retry without a new reason.
 | Calling the next compiled block from compiled code (`call_indirect`) | almost no gain: each hop still writes back and reloads registers |
 | Re-entering the next compiled block straight from `run` | no gain on top of regions |
 | Region "light entry" (load only the entered member's registers) | slower everywhere (ash 2.55 to 3.51 s) |
-| Self-loops as region members | much slower (1150 vs 1880 MIPS) |
+| Self-loops as region members (their home) | much slower (1150 vs 1880 MIPS) |
 | Caching modules by content | only 4% of modules repeat |
 | Growing regions with a fixed threshold (64-1024 exits per target) | some loops 30% faster, ash 4-9% slower, `md5sum` x 8 +40% (each grow recompiles the region) |
-| Growing towards targets on the region's own page | ash 2.81 vs 2.65 s |
 | Cutting a grown region to fit the buffer | dropped members ran interpreted again: ash compiled 50% instead of 88% |
 | Growing only regions of up to 8 members, or only towards a target with a quarter of the exits | no better |
 | Cross-page members only from the breadth-first search, no growth | `yes` 5.90 vs 5.49 s |
 | Compiling modules off the kernel's thread | at most 2.4% (shell) / 4.5% (npx) even if free (Host contract) |
 | A fixed JIT threshold of 2^19 | npx at parity with `--no-jit`, but a memory loop -18%, `md5sum` x 8 +60% |
 | Per-site data-TLB page cache in self-loop modules | slower: TLB loads are L1 hits, extra loop-carried locals cost more |
-| 32-member regions and a 32 KiB emit buffer (2026-11-15) | fewer entries and exits, but apk 3.05 vs 2.88 s: bigger modules cost more per entry and recompile |
+| 32-member regions (2026-11-15, with a 32 KiB emit buffer) | fewer entries and exits, but apk 3.05 vs 2.88 s: bigger modules cost more per entry and recompile |
 | Grow threshold 1024 per KiB (2026-11-15) | a quarter to a third more compiles, time within noise |
 | Four AES T-tables instead of one plus `i32.rotl` | aes-256-cbc +3.6%, below the 4% bar for 6 KiB more `AesTab` |
 | SMP: taking a pending interrupt right after the compile, before the block runs (2026-11-17) | the JIT then takes an interrupt earlier than the interpreter does, so the two diverge; kwemu looks before the compile instead |
@@ -525,11 +530,16 @@ retry without a new reason.
 ## Next steps
 
 Shared-core levers (A64's ranked list: a64/performance.md, Next levers).
-Bigger regions: most exits that remain leave full or closed regions, but
-more members need a smaller `members`/`member_op` encoding (or a bigger
-`KW_CPU_SIZE`, an ABI change) and a bigger emit buffer; measure compile
-cost (module bytes) with it, since that limits growth. Exits into
-self-loop modules and back are the other large group: a self-loop that
-could also run as a guest member of the region it is left to would
-remove both. Cheaper `enter` and region entries (a smaller register
-prologue).
+Bigger regions: most exits that remain leave full or closed regions. On
+7-Zip's LZMA (A64, 2026-11-23) 421 M of 629 M entries follow an exit
+from a closed region: its match finder's regions close at 25-28 KiB with
+7-12 members (about 3.5 KiB per member, much of it data-TLB checks and
+NZCV packing on exit paths), so fewer bytes per member (shared exit
+stubs) would let them grow; more members also need a smaller
+`members`/`member_op` encoding (or a bigger `KW_CPU_SIZE`, an ABI
+change). Exits into self-loop modules and back are the other large group
+(176 M of those entries): self-loops join open regions as guests, but
+not closed ones, and a self-loop module, closed itself, never grows
+towards the region it returns to (a self-loop module that dissolves into
+a home member once its exits are hot would). Cheaper `enter` and region
+entries (a smaller register prologue).

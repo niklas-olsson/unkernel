@@ -18,10 +18,12 @@
 //!    terminator may reach (br/blr compare l_npc with every member's pc; a
 //!    target that is no member, misaligned or not,
 //!    leaves to `run`, which raises what the interpreter would);
-//!  - a terminator of a block compiled on its own whose target is the
-//!    block's start (`at.self_loop`) is `e.backEdge(at.b)`: poll (*irqp,
-//!    and the code epoch where several CPUs exist), budget, charge, loop; a
-//!    conditional one only on the taken path, then it leaves to b.end_pc;
+//!  - a terminator whose target is the block's start (`at.self_loop`; a
+//!    block compiled on its own, or such a block as a region's guest) is
+//!    `e.backEdge(at.b)`: poll (*irqp, and the code epoch where several CPUs
+//!    exist), budget, charge, loop (in a region: the member's own loop); a
+//!    conditional one only on the taken path, then it leaves to b.end_pc
+//!    (in a region: `memberTail`);
 //!  - b_f emits nothing, bl_f and bl set x30, blr sets x30 after reading
 //!    its target (BLR X30 jumps to the old x30).
 //! Conditions come from alu.zig's NZCV model, only through `alu.cond(e,
@@ -651,6 +653,50 @@ test "a64 jit branch: the budget ends at every position of compiled loops" {
         for ([_]u64{ 997, 998, 999, 1000, 1001, 4096 }) |budget| _ = try p.go(l.regs, budget);
         if (jc.enabled) try tt.expectEqual(@as(u64, 0), p.m[0].cpu.priv.jit.handbacks);
     }
+}
+
+/// A self-loop entered from a region: A: movz x3, #3; cbz x9, L. L
+/// (0x10100): subs x3, x3, #1; b.ne L. M (L's end): movz x1, #2; cbz x9, A
+/// (x9 = 0). L keeps a module of its own and joins A's region as a guest
+/// along A's exits to it (`noteHot`).
+const guest_loop: Loop = .{ .p0 = &(.{ movz(3, 3), encCbz(true, false, 9, 0x10004, 0x10100) } ++ [_]u32{svc} ** 62 ++
+    .{ 0xf100_0463, encBcond(1, 0x10104, 0x10100), movz(1, 2), encCbz(true, false, 9, 0x1010c, 0x10000) }), .p1 = &.{}, .regs = .{ .pc = 0x10000 } };
+
+/// Whether the block at pc runs as a guest of some region of m's CPU (its
+/// code copied into a module that is not its home).
+fn guestAt(m: *Machine, pc: u64) bool {
+    if (!jc.enabled) return false;
+    const st = &m.cpu.priv.jit;
+    for (&m.cpu.priv.blocks, 0..) |*b, i| {
+        if (b.pc != pc or b.jx.st < jc.compiled) continue;
+        const home = b.jx.st & 0xffff;
+        for (st.owner, st.members, 0..) |o, ms, s| {
+            if (o == 0 or s == home) continue;
+            for (ms) |x| if (x == i + 1) return true;
+        }
+    }
+    return false;
+}
+
+test "a64 jit branch: a self-loop runs inside a region as a guest: exact budgets, epoch stops" {
+    var p = try Pair.init();
+    defer p.deinit();
+    p.load(guest_loop.p0, guest_loop.p1);
+    try tt.expectEqual(@as(u32, mach.EV_BUDGET), try p.go(guest_loop.regs, 5000));
+    if (jc.enabled) try tt.expect(guestAt(&p.m[0], 0x10100));
+    for (1..100) |budget| _ = try p.go(guest_loop.regs, budget);
+    for ([_]u64{ 997, 998, 999, 1000, 1001, 4096 }) |budget| _ = try p.go(guest_loop.regs, budget);
+    if (!jc.enabled) return;
+    try tt.expectEqual(@as(u64, 0), p.m[0].cpu.priv.jit.handbacks);
+    // Most passes stay in the region: few entries per 10000 instructions.
+    const before = p.m[0].cpu.priv.jit.entries;
+    _ = try p.go(guest_loop.regs, 10000);
+    try tt.expect(p.m[0].cpu.priv.jit.entries - before < 50);
+    // A changed code epoch (a stand-in compiled code reads; `run` reads the
+    // real one): every poll stops, and the budget still ends exactly.
+    var fake: u64 = p.m[0].cpu.priv.a64.seen_epoch +% 1;
+    p.m[0].cpu.priv.a64.epoch_ptr = @intFromPtr(&fake);
+    for ([_]u64{ 1, 2, 7, 100, 1000 }) |budget| _ = try p.go(guest_loop.regs, budget);
 }
 
 /// The compile hook's stand-in for another CPU (jt.hook.call): at compile

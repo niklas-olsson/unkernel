@@ -1,0 +1,10 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// A compute shader writing a storage image.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D img;
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	imageStore(img, p, vec4(vec2(p) / 256.0, 0.0, 1.0));
+}

@@ -20,11 +20,18 @@
 //   path showed, or the renderer's command buffers per second without
 //   virtio-gpu; the renderer's share of the page's time, fences, errors,
 //   the scanout, the WebGL2 implementation: the GPU's own load is not
-//   measured, WebGL does not tell); Emulator (JIT compiles or task
-//   switches); Processes (the busiest TOP, sortable by CPU or memory).
+//   measured, WebGL does not tell); Vulkan, only with guest Vulkan (vm.vk:
+//   frames per second presented with those read back, or compute
+//   dispatches per second while nothing presents; bytes to the GPU and read
+//   back per second; draws, dispatches and submits per second, the
+//   renderer's share of the page's time, the instances, live objects,
+//   pipelines, shader translations, errors and device losses in red, the
+//   load time, the WebGPU adapter; before its load, its state); Emulator
+//   (JIT compiles or task switches); Processes (the busiest TOP, sortable
+//   by CPU or memory).
 //   What needs the guest says it waits for it until its first read (and the
 //   rest shows). Sources: the guest's /proc through stats.ts, the SDK's
-//   vm.stats() (block I/O, the JIT, task switches) and vm.gl, the store (the
+//   vm.stats() (block I/O, the JIT, task switches), vm.gl and vm.vk, the store (the
 //   data disk) and the page's config.
 // - Boot, under the panels: the stages (ui.stages()) as a timeline from the
 //   page's load, stages that overlap on lanes of their own, and their list
@@ -39,12 +46,12 @@ import { useOutsidePress, useTick } from "../hooks.ts";
 import { openSection } from "../sysapps.ts";
 import { KW } from "../kw.ts";
 import { DEFAULT_WISP_SERVERS, type KernelHandle } from "../sdk.ts";
-import { INTERVAL, RING, useStats, type DfRow, type NetDev, type StatsState, type TopProc } from "../stats.ts";
+import { INTERVAL, RING, useStats, type DfRow, type NetDev, type Point, type StatsState, type TopProc } from "../stats.ts";
 import { isRunning, isStarting, phase, useStore } from "../store.ts";
 import { capitalize, fmtBytes, fmtCount, fmtPct, fmtRate, fmtT, fmtUptime, plural } from "../format.ts";
 import { H3 } from "./AppShell.tsx";
 import { Bars, Key, Meter, SECOND, Spark, TONE, fullness } from "./Charts.tsx";
-import { diskUse, GPU_STATE, gpuSeries, latest } from "./Glance.tsx";
+import { diskUse, GPU_STATE, gpuSeries, latest, VK_STATE, vkPath, vkSeries, vkTrouble } from "./Glance.tsx";
 import { ActivityIcon, CpuIcon, DiskIcon, GpuIcon, LogIcon, NetIcon, PromptIcon, RamIcon } from "./icons.tsx";
 
 const B = __KW_BUILD__;
@@ -432,6 +439,59 @@ function GpuCard({ st }: { st: StatsState }) {
 	);
 }
 
+/** Guest Vulkan (stats.ts VkInfo): shown only with it. */
+function VkCard({ st }: { st: StatsState }) {
+	const vk = st.vk!;
+	const pts = st.points;
+	const vs = vkSeries(pts);
+	const vv = latest(pts, vs.get);
+	const at = (get: (p: Point) => number | null) => latest(pts, get);
+	const busy = at((p) => p.vkBusy), up = at((p) => p.vkUp), down = at((p) => p.vkDown);
+	const draws = at((p) => p.vkDraws), disp = at((p) => p.vkDispatch), subs = at((p) => p.vkSubmits);
+	const path = vkPath(at((p) => p.vkFps), at((p) => p.vkExt));
+	const r = vk.renderer;
+	const ready = vk.state === "ready";
+	const bad = vkTrouble(vk);
+	const frames = vs.label === "frames/s";
+	const rate = (v: number | null) => (v != null ? `${fmtCount(v)}/s` : "–");
+	return (
+		<Card title="Vulkan" icon={<GpuIcon size={14} />} tone={TONE.vk} aside={ready ? plural(vk.connections, "instance") : "on WebGPU"}>
+			{ready ? <Figure value={vv != null ? vs.fmt(vv) : "–"} of={frames ? path ?? "presented" : "compute"} />
+				: <Figure value={<span className={vk.state === "lost" || vk.state === "failed" ? "text-err" : ""}>{capitalize(VK_STATE[vk.state])}</span>}
+					of={vk.state === "idle" ? "loads on the first Vulkan program" : vk.state === "lost" ? "restart the Vulkan programs" : undefined} />}
+			<Spark points={pts} height={CHART_H} fmt={vs.fmt} label={`Vulkan ${vs.label}`} series={frames
+				? [{ get: vs.get, label: "frames/s", color: TONE.vk, area: true }, { get: (p) => (p.vkFps != null && p.vkExt != null ? Math.max(0, p.vkFps - p.vkExt) : null), label: "read back", color: SECOND }]
+				: [{ get: vs.get, label: vs.label, color: TONE.vk, area: true }]} />
+			<Spark points={pts} height={CHART_H_SM - 12} fmt={fmtRate} label="Vulkan transfers" series={[
+				{ get: (p) => p.vkUp, label: "to GPU", color: TONE.vk, area: true },
+				{ get: (p) => p.vkDown, label: "read back", color: SECOND },
+			]} />
+			<div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-faint">
+				<Key color={TONE.vk}>{frames ? "frames · to GPU" : `${vs.label} · to GPU`}</Key><Key color={SECOND}>read back</Key>
+			</div>
+			<Facts items={[
+				bad && bad.errors > 0 && ["errors", <span className="text-err" title="WebGPU validation errors and failed operations; the Kernel log and the browser console have them">{fmtCount(bad.errors)}</span>],
+				bad && bad.losses > 0 && ["device lost", <span className="text-err" title={vk.error ?? undefined}>{bad.losses === 1 ? "once" : `${fmtCount(bad.losses)} times`}</span>],
+				bad && bad.lost > 0 && ["programs cut off", <span className="text-err" title="Connections the renderer ended as a lost device for the guest (a failed submit or a request it could not answer)">{fmtCount(bad.lost)}</span>],
+				vk.state === "failed" && ["error", <span className="text-err" title={vk.error ?? undefined}>{vk.error ?? "unknown"}</span>],
+				ready && ["renderer busy", <span title="The share of the page's time spent in the Vulkan renderer: parsing the guest's frames, translating shaders, encoding submits. The GPU's own load is not measured (WebGPU does not tell).">{busy != null ? pct(busy) : "–"}</span>],
+				ready && ["draws", rate(draws)],
+				ready && ["dispatches", rate(disp)],
+				ready && ["submits", rate(subs)],
+				ready && ["to GPU", up != null ? fmtRate(up) : "–"],
+				ready && ["read back", down != null ? fmtRate(down) : "–"],
+				r && ["frames", <span title={`${fmtCount(r.externalPresents)} by external buffer (zero-copy), ${fmtCount(r.presents - r.externalPresents)} read back`}>{fmtCount(r.presents)}</span>],
+				r && ["live objects", <span title={`${fmtCount(r.liveObjects)} guest objects, ${fmtCount(r.liveGpu)} GPU buffers and textures`}>{fmtCount(r.liveObjects)} · {fmtCount(r.liveGpu)}</span>],
+				r && ["pipelines", fmtCount(r.pipelines)],
+				r && ["shaders", <span title="SPIR-V to WGSL translations and the time they took">{fmtCount(r.translations)}, {fmtT(r.translateMs)}</span>],
+				["instances", `${fmtCount(vk.connections)} now · ${fmtCount(vk.opened)} so far`],
+				vk.loadMs != null && ["loaded in", fmtT(vk.loadMs)],
+			]} />
+			{vk.adapter && <p className="truncate text-[11px] text-faint" title={vk.adapter}>WebGPU <span className="text-muted">{vk.adapter}</span></p>}
+		</Card>
+	);
+}
+
 function EmulatorCard({ st }: { st: StatsState }) {
 	const cfg = KW.config;
 	const s = st.host?.stats, j = s?.jit;
@@ -557,7 +617,10 @@ function Live({ st }: { st: StatsState }) {
 
 export function Overview() {
 	const st = useStats();
-	const gpu = !!st.gpu;
+	const gpu = !!st.gpu, vk = !!st.vk;
+	// The panels before Processes: five, with guest GL's and Vulkan's six or seven; it fills the grid's last row.
+	const n = 5 + Number(gpu) + Number(vk);
+	const span = `${n % 2 ? "" : "@lg:col-span-2"} ${["@4xl:col-span-3", "@4xl:col-span-2", "@4xl:col-span-1"][n % 3]}`;
 	return (
 		<div className="@container flex flex-col gap-4">
 			<StateLine st={st} />
@@ -572,9 +635,9 @@ export function Overview() {
 					<DiskCard st={st} />
 					<NetworkCard st={st} />
 					{gpu && <GpuCard st={st} />}
+					{vk && <VkCard st={st} />}
 					<EmulatorCard st={st} />
-					{/* Six panels before it with the GPU: it takes a whole row; five without: it fills the grid's last cell. */}
-					<ProcessesCard st={st} className={gpu ? "@lg:col-span-2 @4xl:col-span-3" : ""} />
+					<ProcessesCard st={st} className={span} />
 				</div>
 			</div>
 			<BootTimeline />

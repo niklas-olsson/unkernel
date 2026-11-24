@@ -26,7 +26,7 @@
 #   /var/cache/apt/srcpkgcache.bin  apt's source cache of those lists, made
 #                             by the image's apt at build time (needs the
 #                             base bundle and node; else left out)
-#   curl, ca-certificates, unzip, procps, less, vim-tiny, xz-utils, zstd,
+#   curl, wget, ca-certificates, unzip, procps, less, vim-tiny, xz-utils, zstd,
 #   iproute2, htop, tmux, sudo, libatomic1, sysv-rc installed
 #                             (DEBIAN_PACKAGES, below; needs the same)
 #   /usr/lib/kw-commands      "NAME PACKAGE" per command of main, for
@@ -222,7 +222,7 @@ chmod 755 "$stage/usr/lib/kw/wlandr"
 # libatomic1: the official Node.js build links it (the kw layer's node shim).
 # sysv-rc (with insserv and startpar): the service runner kw-init drives
 # (below, and rootfs/usr/local/sbin/kw-init).
-DEBIAN_PACKAGES="curl ca-certificates unzip procps less vim-tiny xz-utils zstd iproute2 htop tmux sudo libatomic1 sysv-rc"
+DEBIAN_PACKAGES="curl wget ca-certificates unzip procps less vim-tiny xz-utils zstd iproute2 htop tmux sudo libatomic1 sysv-rc"
 # Both are made by the image's own programs: the tree as it is at that
 # point becomes a first image (erofs, uncompressed), which boots on the
 # distroless bundle (guest/tools/vm-run.ts); files come out over exec's

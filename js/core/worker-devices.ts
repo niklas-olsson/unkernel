@@ -28,15 +28,20 @@
 //   triple buffer that frame() reads at any time; readFrame() is answered
 //   by a "frame-ready" message. Without a frame buffer from the worker,
 //   frames fall back to the credits above.
-// - Sound (SoundBridge): chunks come with a sequence number; the sink's
-//   onChunk() answer (frames queued at the sink) goes back, throttled to
-//   one per SOUND_REPORT_MS, with the time it was measured. The worker's
-//   answer to the kernel is that report, less what played since, plus the
-//   frames sent after it (worker-serve.ts).
+// - Sound (SoundBridge): with the shared transport the PCM comes through
+//   the sound ring (sound-ring.ts), drained here into the sink's onChunk()
+//   on a "sound-wake" message, or handed to the sink's onRing() to read
+//   itself; the sink's answer (frames queued at the sink) goes back through
+//   the ring. Without it, chunks come as messages with a sequence number,
+//   and the answer goes back throttled to one per SOUND_REPORT_MS, with
+//   the time it was measured; the worker's answer to the kernel is that
+//   report, less what played since, plus the frames sent after it
+//   (worker-serve.ts).
 
 import { xrgbToRgba, type DisplayFrame, type DisplayMode } from "./display.ts";
 import { INPUT_KEYBOARD, INPUT_MOUSE, INPUT_TABLET, type Evdev, type InputState } from "./input.ts";
 import type { SoundChunk, SoundEvent, SoundFormat, SoundSink, SoundState } from "./sound.ts";
+import { SoundRingReader } from "./sound-ring.ts";
 import { EVDEV_OP, type ToWorker } from "./worker-protocol.ts";
 import type { SharedOwner } from "./worker-shared.ts";
 
@@ -297,29 +302,103 @@ export class FrameClient {
 	}
 }
 
-/** Feeds the owner's SoundSink from "sound-*" messages and reports its queue back. */
+/**
+ * Feeds the owner's SoundSink from sound messages or the shared sound ring.
+ * With a ring read here, a state change is delivered where its record sits
+ * in the ring, between the chunks around it, not when its message arrives.
+ */
 export class SoundBridge {
 	state: SoundState = { open: false, playing: false, format: null };
 	#sink: SoundSink;
 	#post: (msg: ToWorker) => void;
 	#log: (msg: string) => void;
 	#lastReport = -Infinity;
+	#reader: SoundRingReader | undefined;
+	#ring: SharedArrayBuffer | undefined;
+	#ringDelivered = false;
+	/** Ring read here: state messages whose record the drain has not reached, oldest first. */
+	#states: Array<{ n: number; state: SoundState; event: SoundEvent }> = [];
+	/** The number of the latest state message. */
+	#arrived = 0;
+	#dropped = 0;
 
-	constructor(sink: SoundSink, post: (msg: ToWorker) => void, log: (msg: string) => void) {
+	constructor(sink: SoundSink, post: (msg: ToWorker) => void, log: (msg: string) => void, ring?: SharedArrayBuffer) {
 		this.#sink = sink;
 		this.#post = post;
 		this.#log = log;
+		if (ring && sink.onRing) this.#ring = ring;
+		else if (ring && sink.onChunk) this.#reader = new SoundRingReader(ring);
+		if (ring) this.#dropped = new SoundRingReader(ring).droppedBytes();
 	}
 
 	get playing(): boolean {
 		return this.state.playing;
 	}
 
-	/** @internal A "sound-state" message. */
-	onState(state: SoundState, event: SoundEvent): void {
+	/** @internal Hand the shared sound ring to sink.onRing once the worker starts. */
+	startRing(): void {
+		if (!this.#ring || this.#ringDelivered) return;
+		this.#ringDelivered = true;
+		try { this.#sink.onRing?.(this.#ring); } catch (e) { this.#log(`[sound] onRing failed: ${e}`); }
+	}
+
+	/** @internal Drain the shared sound ring into sink.onChunk, and the state changes in its order. */
+	onWake(): void {
+		const reader = this.#reader;
+		if (!reader) return;
+		for (;;) {
+			const n = reader.nextEvent();
+			if (n >= 0) {
+				// Its message has not arrived (messages are slower than the ring): it drains again.
+				if (n > this.#arrived) break;
+				this.#deliverStates(n);
+				reader.readNext();
+				continue;
+			}
+			const rec = reader.readNext();
+			if (!rec) {
+				// Empty: a message still waiting had no room for its record.
+				this.#deliverStates(this.#arrived);
+				break;
+			}
+			const chunk: SoundChunk = { format: rec.format, data: rec.data, frames: Math.floor(rec.data.length / rec.format.frameBytes) };
+			let queued: number | void = 0;
+			try { queued = this.#sink.onChunk?.(chunk); } catch (e) { this.#log(`[sound] onChunk failed: ${e}`); }
+			reader.setQueuedFrames(queued || 0);
+		}
+		this.#reportDrops(reader.droppedBytes());
+	}
+
+	#deliverStates(upTo: number): void {
+		while (this.#states.length && this.#states[0]!.n <= upTo) {
+			const s = this.#states.shift()!;
+			this.#deliver(s.state, s.event);
+		}
+	}
+
+	#deliver(state: SoundState, event: SoundEvent): void {
 		this.state = state;
 		if (event === "start") this.#lastReport = -Infinity;
 		try { this.#sink.onState?.(state, event); } catch (e) { this.#log(`[sound] onState failed: ${e}`); }
+	}
+
+	#reportDrops(dropped: number): void {
+		if (dropped === this.#dropped) return;
+		this.#log(`[sound] the sound ring was full: ${(dropped - this.#dropped) >>> 0} bytes of PCM dropped`);
+		this.#dropped = dropped;
+	}
+
+	/** @internal A "sound-state" message (`n`: its number, as on its record in the ring). */
+	onState(state: SoundState, event: SoundEvent, n: number): void {
+		this.startRing();
+		if (this.#reader) {
+			this.#states.push({ n, state, event });
+			this.#arrived = n;
+			this.onWake();
+			return;
+		}
+		if (this.#ring) this.#reportDrops(new SoundRingReader(this.#ring).droppedBytes());
+		this.#deliver(state, event);
 	}
 
 	/** @internal A "sound-chunk" message. */

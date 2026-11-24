@@ -5,7 +5,7 @@
 //! lives in the caller's `struct kw_cpu` (KW_CPU_SIZE bytes) and
 //! `struct kw_regs`.
 //!
-//! MMU: walks Sv39-layout page tables straight out of linear memory
+//! MMU: walks Sv48-layout page tables straight out of linear memory
 //! (`phys_base + pa`), like hardware, and caches successful translations in
 //! three direct-mapped TLBs (read / write / exec) inside kw_cpu. The
 //! emulator never writes PTEs: A=0 (or D=0 on a store) raises KW_EV_FAULT.
@@ -22,7 +22,7 @@ const std = @import("std");
 const core = @import("../cpu/core.zig");
 const c = @import("kw_h"); // include/kw_emu.h via translate-c
 
-pub const abi_version: u32 = 3;
+pub const abi_version: u32 = 4;
 pub const cpu_size: usize = 9 << 20;
 
 pub const Event = extern struct {
@@ -208,7 +208,7 @@ pub const JitStats = extern struct {
     gen_words: [3 * gen_words_n]u64 = @splat(0),
 };
 
-pub const gen_words_n = 512;
+pub const gen_words_n = 256;
 
 /// -Dkwemu-stats: count one execution of the `generic` op `raw` in
 /// JitStats.gen_words, or (`from_jit`) one call of it from compiled code.
@@ -381,10 +381,9 @@ pub const Cpu = extern struct {
         for (x) |e| if (e.tag == vpn) return (vpn << page_shift) +% e.add;
         const r = self.priv.tlb_r[@intCast(vpn & (dtlb_n - 1))];
         if (r.tag == vpn) return (vpn << page_shift) +% r.add;
-        const top = va >> 38;
-        if (top != 0 and top != (1 << 26) - 1) return null;
+        if (va >> 48 != 0) return null;
         var table = self.pgd;
-        var level: u6 = 2;
+        var level: u6 = 3;
         while (true) : (level -= 1) {
             const e = hostLoad(u64, self.phys_base +% table +% ((va >> (page_shift + 9 * @as(u6, level))) & 511) * 8);
             if (e & pte_v == 0) return null;
@@ -439,11 +438,11 @@ pub const Cpu = extern struct {
             .write => count(self, "walks_w", 1),
             .exec => count(self, "walks_x", 1),
         }
-        // Sv39: bits 63..39 must equal bit 38.
-        const top = va >> 38;
-        if (top != 0 and top != (1 << 26) - 1) return self.fault(va, access);
+        // User addresses are the whole 48 bits the four levels index (as
+        // arm64's TTBR0 with 48-bit VAs): no sign-extended upper half.
+        if (va >> 48 != 0) return self.fault(va, access);
         var table = self.pgd;
-        var level: u6 = 2;
+        var level: u6 = 3;
         const pte: u64 = while (true) : (level -= 1) {
             const idx = (va >> (page_shift + 9 * @as(u6, level))) & 511;
             const e = hostLoad(u64, self.phys_base +% table +% idx * 8);

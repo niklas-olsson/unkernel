@@ -1,4 +1,4 @@
-From 43a9925856472dfcfdd7a86c7ac2b7f46b7b84cb Mon Sep 17 00:00:00 2001
+From 21c584d5fec5803098ebcb2829830433dc4f1bc4 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Sat, 21 Nov 2026 18:55:03 +0000
 Subject: [PATCH] wasm: kwvirtio on SMP

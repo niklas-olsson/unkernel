@@ -1,4 +1,4 @@
-From fc163bd15fcb5ba300d1e33d15ed1db5085f0602 Mon Sep 17 00:00:00 2001
+From 2d46ebfca2f3d9bcae3558ffd3efd6df6b914cb7 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 23 Nov 2026 09:01:35 +0000
 Subject: [PATCH] wasm: give each CPU's word of pending interrupts 128 bytes
@@ -16,8 +16,9 @@ thread, and of words on their own pages at 3.3x.
 Align the secondaries' words to 128 bytes, and put CPU 0's
 wasm_host_irqs, with padding behind it, into a section of its own.
 ---
- arch/wasm/kernel/irq.c | 11 +++++++++--
- 1 file changed, 9 insertions(+), 2 deletions(-)
+ arch/wasm/kernel/irq.c         | 11 +++++++++--
+ arch/wasm/kernel/vmlinux.lds.S |  9 +++++++++
+ 2 files changed, 18 insertions(+), 2 deletions(-)
 
 diff --git a/arch/wasm/kernel/irq.c b/arch/wasm/kernel/irq.c
 index 69ca8bcd6e1..c14aed445bd 100644
@@ -47,6 +48,26 @@ index 69ca8bcd6e1..c14aed445bd 100644
  
  u32 *kw_irq_word_of(int cpu)
  {
+diff --git a/arch/wasm/kernel/vmlinux.lds.S b/arch/wasm/kernel/vmlinux.lds.S
+index 9385899a494..b8ab97c38d7 100644
+--- a/arch/wasm/kernel/vmlinux.lds.S
++++ b/arch/wasm/kernel/vmlinux.lds.S
+@@ -55,6 +55,15 @@ SECTIONS
+ 	_sdata = .;
+ 	RO_DATA(PAGE_SIZE)
+ 	RW_DATA(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
++	/*
++	 * CPU 0's word of pending interrupts and its padding (irq.c). A section
++	 * that no rule here places goes behind _end, into memory that
++	 * setup_arch() gives to the page allocator.
++	 */
++	. = ALIGN(128);
++	.data..kw_irq0 : AT(ADDR(.data..kw_irq0) - LOAD_OFFSET) {
++		*(.data..kw_irq0)
++	}
+ 	_edata = .;
+ 
+ 	EXCEPTION_TABLE(16)
 -- 
 2.56.0
 

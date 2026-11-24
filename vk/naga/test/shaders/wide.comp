@@ -1,0 +1,7 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// A 512-wide workgroup (ggml's get_rows/copy) that only uses the global id.
+layout(local_size_x = 512) in;
+layout(set = 0, binding = 0) buffer B { float v[]; } b;
+void main() { b.v[gl_GlobalInvocationID.x] *= 2.0; }

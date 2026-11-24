@@ -1,0 +1,8 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// Storage images without a format (shaderStorageImageWriteWithoutFormat).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform writeonly image2D img;
+layout(set = 0, binding = 1) uniform writeonly uimage2D uimg;
+void main() { imageStore(img, ivec2(gl_GlobalInvocationID.xy), vec4(1.0)); imageStore(uimg, ivec2(0), uvec4(1)); }

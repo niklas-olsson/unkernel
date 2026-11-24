@@ -5,7 +5,7 @@
 # (guest/lib/image.sh), the read-only root that the base initramfs mounts
 # under the root overlay: the aarch64 minirootfs as Alpine builds it, apk
 # with lazy repositories and command-not-found installs, qemu-user for
-# foreign binaries, the curl and bwrap shims, the X.Org config. The kw guest
+# foreign binaries, the curl shim, the X.Org config. The kw guest
 # tools, the runtime its init calls (/usr/lib/kw/) and the overlay root's
 # boot logic come from the base. An `apk add` that was cut off needs no
 # cleanup: run it again, and apk replaces what it left. The files unkernel

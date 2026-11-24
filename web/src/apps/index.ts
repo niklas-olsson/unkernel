@@ -8,6 +8,7 @@
 // A new app: a file in its group's folder, added to that folder's index.ts.
 // A new group: a folder with an index.ts (defineGroup()), added below.
 import agents from "./agents/index.ts";
+import browsers from "./browsers/index.ts";
 import desktop from "./desktop/index.ts";
 import games from "./games/index.ts";
 import gl from "./gl/index.ts";
@@ -19,6 +20,6 @@ import system from "./system/index.ts";
 import tools from "./tools/index.ts";
 import type { App, Group } from "./types.ts";
 
-export const GROUPS: Group[] = [system, agents, tools, runtimes, servers, linux, desktop, games, media, gl];
+export const GROUPS: Group[] = [system, agents, tools, runtimes, servers, linux, browsers, desktop, games, media, gl];
 /** Every app, hidden ones too, in the groups' order. */
 export const APPS: App[] = GROUPS.flatMap((g) => g.apps);

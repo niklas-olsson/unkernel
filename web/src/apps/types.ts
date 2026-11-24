@@ -96,8 +96,8 @@ interface AppBase {
 	icon?: string | AppIcon;
 	/** The tile's gradient, top left to bottom right (CSS colours). */
 	colors?: [string, string];
-	/** wayland: the Wayland desktop (wayland.ts: a kernel with vsock and kwshm). */
-	needs?: { display?: boolean; net?: boolean; sound?: boolean; wayland?: boolean };
+	/** wayland: the Wayland desktop (wayland.ts: a kernel with vsock and kwshm); vk: guest Vulkan (the Vulkan option). */
+	needs?: { display?: boolean; net?: boolean; sound?: boolean; wayland?: boolean; vk?: boolean };
 }
 
 /** An app run in a new terminal tab named after it (launcher.ts). */

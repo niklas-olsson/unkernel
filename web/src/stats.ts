@@ -3,8 +3,8 @@
 // The live numbers of System's Overview (components/Overview.tsx), of the
 // top bar's resource meters (components/TopBar.tsx) and of the Control
 // Center's resources (components/Glance.tsx): one sampler that reads the guest's /proc,
-// the SDK's host counters and guest GL's counters, and keeps a short history
-// of them for the charts.
+// the SDK's host counters and guest GL's and guest Vulkan's counters, and
+// keeps a short history of them for the charts.
 //
 // - One guest read per sample: a vm.exec() of STATS_SH, a POSIX sh snippet
 //   (dash on Debian, busybox ash on Alpine and the base shell) of shell
@@ -22,7 +22,14 @@
 //   taken with each sample, and guest GL's (vm.gl: the renderer's state and
 //   WebGL2 implementation, its command buffers and the time it spent on
 //   them, virtio-gpu's presents, fences and errors; the Wayland compositor's
-//   GPU commits, wayland/buffers.ts stats): a few property reads, no guest.
+//   GPU commits, wayland/buffers.ts stats), and guest Vulkan's (vm.vk: the
+//   renderer's state and WebGPU adapter, the instances served, device losses,
+//   and the renderer's counters: presents, external presents, draws,
+//   dispatches, submits, bytes written and read back, pipelines, shader
+//   translations, errors, live objects): a few property reads, no guest.
+//   Neither ever starts a renderer's load: each loads on the guest's first
+//   use, and before that (or with the option off: no vm.gl, no vm.vk) there
+//   is nothing to read.
 // - Users: useStats() (full: the Overview while System's window shows it,
 //   the top bar's Resources while it is open) samples every INTERVAL ms with the
 //   full snippet; useStats("lite") (the top bar, always mounted) samples
@@ -327,6 +334,23 @@ export interface Point {
 	fps: number | null;
 	glCmd: number | null;
 	glBusy: number | null;
+	/**
+	 * Guest Vulkan (null without its renderer, or across a new one): presents
+	 * per second (all of them, and those by external buffer: zero-copy, no
+	 * readback; the rest were read back), draws, compute dispatches and
+	 * submits per second, buffer bytes written to the GPU and bytes read back
+	 * per second, and the share of the page's time, 0 to 1, the renderer
+	 * spent parsing the guest's frames, translating shaders and encoding
+	 * submits (its load on the page; WebGPU does not tell the GPU's).
+	 */
+	vkFps: number | null;
+	vkExt: number | null;
+	vkDraws: number | null;
+	vkDispatch: number | null;
+	vkSubmits: number | null;
+	vkUp: number | null;
+	vkDown: number | null;
+	vkBusy: number | null;
 }
 
 /** Guest GL's state at the last sample (vm.gl), or null without guest GL. */
@@ -352,6 +376,29 @@ export interface GpuInfo {
 	wlGpu: number;
 }
 
+/** Guest Vulkan's state at the last sample (vm.vk), or null without it (the option off, no WebGPU). */
+export interface VkInfo {
+	/** The renderer: idle (loads on the guest's first VkInstance), loading, ready, lost (its WebGPU device), failed. */
+	state: "idle" | "loading" | "ready" | "lost" | "failed";
+	/** The WebGPU adapter it runs on, once loaded. */
+	adapter: string | null;
+	/** How long its load took, ms, or null. */
+	loadMs: number | null;
+	/** Why it failed or was lost, or null. */
+	error: string | null;
+	/** Guest VkInstances served now, and since the start. */
+	connections: number;
+	opened: number;
+	/** WebGPU devices lost. */
+	losses: number;
+	/** The current renderer's counters (vm.vk.stats.renderer; they start again with each new renderer), or null before the first program and after a loss. */
+	renderer: {
+		presents: number; externalPresents: number; draws: number; dispatches: number; submits: number;
+		bytesWritten: number; bytesRead: number; pipelines: number; translations: number; translateMs: number;
+		errors: number; lost: number; liveObjects: number; liveGpu: number;
+	} | null;
+}
+
 export interface StatsState {
 	points: Point[];
 	/** The last guest read and what it gave, or null before the first one. */
@@ -362,13 +409,15 @@ export interface StatsState {
 	host: { t: number; stats: InstanceStats } | null;
 	/** Guest GL at the last sample, or null without it. */
 	gpu: GpuInfo | null;
+	/** Guest Vulkan at the last sample, or null without it. */
+	vk: VkInfo | null;
 	/** The last guest read failed, or none has been made: the cards that need the guest wait. */
 	waiting: boolean;
 	/** Why no sample is being taken now ("" while sampling). */
 	idle: string;
 }
 
-const $ = createStore<StatsState>({ points: [], guest: null, df: null, host: null, gpu: null, waiting: true, idle: "" });
+const $ = createStore<StatsState>({ points: [], guest: null, df: null, host: null, gpu: null, vk: null, waiting: true, idle: "" });
 export const stats$ = $;
 
 /** Mounted users: full (the Overview) and light (the top bar). */
@@ -384,6 +433,8 @@ let fullReads = 0;
 let prevHost: { t: number; s: InstanceStats } | null = null;
 /** Guest GL's counters at the last sample: frames shown, command buffers, ms in the renderer. */
 let prevGpu: { t: number; frames: number; submits: number | null; busyMs: number | null } | null = null;
+/** Guest Vulkan's renderer counters at the last sample (with the device losses then: a new renderer counts from 0). */
+let prevVk: { t: number; losses: number; r: NonNullable<VkInfo["renderer"]>; busyMs: number } | null = null;
 
 /** Why sampling does not run in each phase of the machine (store.ts phase()); "": it may. */
 const PHASE_WHY: Record<Phase, string> = {
@@ -411,7 +462,7 @@ async function tick(): Promise<void> {
 	if (!users() || inflight) return;
 	const why = blocked();
 	if ($.get().idle !== why) $.set({ idle: why });
-	if (why) { prevHost = prevGpu = null; schedule(); return; }
+	if (why) { prevHost = prevGpu = prevVk = null; schedule(); return; }
 	inflight = true;
 	const t0 = Date.now();
 	try {
@@ -425,7 +476,8 @@ async function tick(): Promise<void> {
 
 async function sample(vm: KernelHandle): Promise<void> {
 	const t = Date.now();
-	const pt: Point = { t, cpu: null, cpus: null, mem: null, memTotal: null, rx: null, tx: null, rd: null, wr: null, jit: null, sw: null, mips: null, fps: null, glCmd: null, glBusy: null };
+	const pt: Point = { t, cpu: null, cpus: null, mem: null, memTotal: null, rx: null, tx: null, rd: null, wr: null, jit: null, sw: null, mips: null, fps: null, glCmd: null, glBusy: null,
+		vkFps: null, vkExt: null, vkDraws: null, vkDispatch: null, vkSubmits: null, vkUp: null, vkDown: null, vkBusy: null };
 	// Host counters: no guest involved.
 	let host: StatsState["host"] = $.get().host;
 	try {
@@ -442,6 +494,7 @@ async function sample(vm: KernelHandle): Promise<void> {
 		host = { t, stats: s };
 	} catch { /* the kernel is gone: the guest read fails too */ }
 	const gpu = sampleGpu(vm, pt);
+	const vk = sampleVk(vm, pt);
 	// The guest: one exec of the snippet.
 	const st = $.get();
 	let guest = st.guest, df = st.df, waiting = false;
@@ -464,7 +517,7 @@ async function sample(vm: KernelHandle): Promise<void> {
 	}
 	const points = [...$.get().points, pt];
 	if (points.length > RING) points.splice(0, points.length - RING);
-	$.set({ points, guest, df, host, gpu, waiting });
+	$.set({ points, guest, df, host, gpu, vk, waiting });
 }
 
 /** Guest GL's state and rates (into pt) from vm.gl, or null without it; property reads only. */
@@ -494,6 +547,40 @@ function sampleGpu(vm: KernelHandle, pt: Point): GpuInfo | null {
 			} : null,
 			wlGpu: wlStats.gpuCommits,
 		};
+	} catch {
+		return null;
+	}
+}
+
+/** Guest Vulkan's state and rates (into pt) from vm.vk, or null without it; property reads only (never vm.vk.load()). */
+function sampleVk(vm: KernelHandle, pt: Point): VkInfo | null {
+	let vk;
+	try { vk = vm.vk; } catch { return null; }
+	if (!vk) { prevVk = null; return null; }
+	try {
+		const s = vk.status, st = vk.stats, x = st.renderer;
+		const n = (k: string) => x?.[k] ?? 0;
+		const r: VkInfo["renderer"] = x ? {
+			presents: n("presents"), externalPresents: n("externalPresents"), draws: n("draws"), dispatches: n("dispatches"), submits: n("submits"),
+			bytesWritten: n("bytesWritten"), bytesRead: n("bytesRead"), pipelines: n("pipelines"), translations: n("translations"), translateMs: n("translateMs"),
+			errors: n("errors"), lost: n("lost"), liveObjects: n("liveObjects"), liveGpu: n("liveGpu"),
+		} : null;
+		const busyMs = n("encodeMs") + n("parseMs") + n("translateMs");
+		const p = prevVk, dt = p ? (pt.t - p.t) / 1000 : 0;
+		// No rates across a new renderer (after a device loss its counters start again).
+		if (r && p && p.losses === st.losses && r.submits >= p.r.submits && dt > 0 && dt < GAP / 1000) {
+			const rate = (k: keyof typeof r) => Math.max(0, (r[k] - p.r[k]) / dt);
+			pt.vkFps = rate("presents");
+			pt.vkExt = rate("externalPresents");
+			pt.vkDraws = rate("draws");
+			pt.vkDispatch = rate("dispatches");
+			pt.vkSubmits = rate("submits");
+			pt.vkUp = rate("bytesWritten");
+			pt.vkDown = rate("bytesRead");
+			pt.vkBusy = Math.min(1, Math.max(0, (busyMs - p.busyMs) / (dt * 1000)));
+		}
+		prevVk = r ? { t: pt.t, losses: st.losses, r, busyMs } : null;
+		return { state: s.state, adapter: s.adapter, loadMs: s.loadMs, error: s.error, connections: st.connections, opened: st.opened, losses: st.losses, renderer: r };
 	} catch {
 		return null;
 	}

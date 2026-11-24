@@ -100,7 +100,7 @@ git -C vendor/src/linux-wasm-kernel format-patch -N -o "$PWD/kernel/patches/linu
 warns if they differed, so a header change also needs a kernel commit and
 a patch re-export.
 
-- `KW_ABI_VERSION` is 3. `tlb.c` compares it with `kw_abi_version()` at
+- `KW_ABI_VERSION` is 4. `tlb.c` compares it with `kw_abi_version()` at
   boot and panics on a mismatch. Bump it in both copies on any change to
   the layout or the semantics; the header describes the current contract
   only. A new `KW_ISA_*` bit is an ABI change; implementing an extension
@@ -170,9 +170,9 @@ a patch re-export.
 
 - The kernel runs only in the direct map: virtual = physical = linear
   address, and `phys_base` is 0. Guest RAM is below 4 GiB.
-- User page tables use the RISC-V Sv39 layout and PTE bits whatever the
-  guest ISA (`_PAGE_PROT_NONE` = G, arch/riscv's swap format), in 3 levels
-  with the PUD folded; kwemu walks them like hardware.
+- User page tables use the RISC-V Sv48 layout and PTE bits whatever the
+  guest ISA (`_PAGE_PROT_NONE` = G, arch/riscv's swap format), in 4 levels
+  with the P4D folded; kwemu walks them like hardware.
 - vmalloc returns direct-mapped memory (`mm/vmalloc-flat.c`), so `vmap()`
   of scattered pages returns NULL (nothing in this config hits that).
   There is no `VMAP_STACK` and no stack guard; per-cpu memory is
@@ -378,19 +378,26 @@ MTE, PAC, BTI, GCS or POE.
   line's (`lse` also names `atomics`). kwemu keeps SHA512 only with SHA2,
   so `-sha2` turns both off. A masked feature raises SIGILL like an
   unimplemented instruction. Every feature kwemu implements starts on.
-- Address space: user page tables keep the Sv39 format, and TASK_SIZE is
-  1 << 38 (256 GiB), half of arm64's 39-bit VA: mmap hints and MAP_FIXED at
-  or above 1 << 38 do not get there. kwemu has no top-byte-ignore, so
-  tagged pointers fault (SIGSEGV), and there is no tagged address ABI
-  (`PR_SET_TAGGED_ADDR_CTRL`).
+- Address space: user page tables keep the Sv48 format, and TASK_SIZE is
+  1 << 48 (256 TiB), arm64's 48-bit VA: all four levels' index bits, with
+  no sign-extended upper half (kwemu faults any address at or above
+  1 << 48), so large reservations such as .NET's 256 GiB GC regions range
+  and Ladybird's 4 TiB GC cage fit. kwemu has no top-byte-ignore, so tagged pointers fault (SIGSEGV),
+  and there is no tagged address ABI (`PR_SET_TAGGED_ADDR_CTRL`).
 - New code: user space makes it visible with DC CVAU and IC IVAU (CTR_EL0
   has IDC = DIC = 0); there is no cache-flush syscall. IC IVAU on one CPU
   is seen by every CPU (smp.md, MM).
 - The exclusive monitor belongs to the CPU, not the task, and every entry
   to user mode clears it (The kwemu contract), as ERET does on arm64 and
   qemu-user does.
-- ptrace has no regsets (`PTRACE_GETREGSET` fails), so strace and gdb do
-  not work. No core dumps, seccomp, modules, swap or kallsyms (config.md).
+- ptrace (ptrace.c): arm64's regsets NT_PRSTATUS (pstate is NZCV and
+  EL0t), NT_PRFPREG, NT_ARM_TLS and NT_ARM_SYSTEM_CALL (the syscall
+  number apart from x8, as arm64's `syscallno`), which also make the core
+  dump notes; single-step in software (traps.c: `kw_run()` with a budget
+  of 1, a stepped SVC reported at its exit); no hardware breakpoints or
+  watchpoints. The kernel's writes into user code (POKETEXT,
+  `/proc/PID/mem`) flush the page (`flush_icache_user_page`, tlb.c). No
+  modules, swap or kallsyms (config.md).
   A wasm trap in the kernel ends the session.
 
 ## Two builds: wasm64 and lowered

@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint k; uint n; } pc;
+layout(set = 0, binding = 0) readonly buffer In { uint v[]; } src;
+// binding 1 has no descriptors in the set layout (consecutive updates skip it)
+layout(set = 0, binding = 2) buffer Arr { uint v[]; } arr[2];
+layout(set = 0, binding = 3) buffer Out { uint v[]; } out3;
+layout(set = 0, binding = 4) buffer Dyn { uint v[]; } dyn; // STORAGE_BUFFER_DYNAMIC
+void main()
+{
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.n)
+		return;
+	uint s = src.v[i];
+	arr[0].v[i] = s * pc.k;
+	arr[1].v[i] = s * pc.k + 1u;
+	out3.v[i] = s * pc.k + 2u;
+	dyn.v[i] = s * pc.k + 3u;
+}

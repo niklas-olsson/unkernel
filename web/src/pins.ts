@@ -30,8 +30,8 @@ import { isMobile } from "./config.ts";
 const KEY = "pins";
 /** A stored group entry's prefix. */
 const GROUP = "group:";
-/** A fresh profile's pins on a desktop: the console's Terminal, Chromium, Thunar, the Desktop and Games folders and Settings. */
-const DESKTOP_PINS: readonly string[] = ["terminal", "chromium", "thunar", `${GROUP}desktop`, `${GROUP}games`, "settings"];
+/** A fresh profile's pins on a desktop: the console's Terminal, the Browsers, AI, Desktop, Graphics and Games folders and Settings. */
+const DESKTOP_PINS: readonly string[] = ["terminal", `${GROUP}browsers`, `${GROUP}agents`, `${GROUP}desktop`, `${GROUP}gl`, `${GROUP}games`, "settings"];
 /** A fresh profile's pins on a phone (config.ts isMobile()): the console's Terminal, glmark2, Galculator, the Desktop folder and Settings. */
 const MOBILE_PINS: readonly string[] = ["terminal", "glmark2", "galculator", `${GROUP}desktop`, "settings"];
 /** A fresh profile's pins: MOBILE_PINS on a phone, else DESKTOP_PINS. */

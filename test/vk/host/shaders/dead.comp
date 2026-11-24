@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+layout(local_size_x = 1) in;
+layout(constant_id = 0) const uint MODE = 0;
+layout(set = 0, binding = 2) writeonly buffer B2 { uint v[]; } b2;
+layout(set = 0, binding = 3) writeonly buffer B3 { uint v[]; } b3;
+void main() { if (MODE == 0) b2.v[0] = 7u; else b3.v[0] = 9u; }

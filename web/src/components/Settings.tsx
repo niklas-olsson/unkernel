@@ -50,7 +50,7 @@ const SECTIONS: SectionDef[] = [
 const SETTING_SECTION: Record<string, Tab> = {
 	mem: "boot", cpus: "boot", worker: "boot", jit: "boot", verbose: "boot", append: "boot",
 	distro: "distro", root: "distro", data: "storage", datasize: "storage", wisp: "network", udp: "network",
-	display: "display", gl: "display", sound: "display", autosuspend: "session", askleave: "session",
+	display: "display", gl: "display", vk: "display", sound: "display", autosuspend: "session", askleave: "session",
 };
 
 /** The sections whose options differ from this boot's settings. */

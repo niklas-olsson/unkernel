@@ -1,4 +1,4 @@
-From 2207e8f75cf52b4da7215ff465ba055fc10a49cb Mon Sep 17 00:00:00 2001
+From 4070a45f95f1b20d6f88cf86e39d44a04049ab54 Mon Sep 17 00:00:00 2001
 From: kernel-wasm <kernel-wasm@localhost>
 Date: Mon, 16 Nov 2026 14:54:54 +0000
 Subject: [PATCH] mm: skip folio_ref_add() of zero when mapping an order-0

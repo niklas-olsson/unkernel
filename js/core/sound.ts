@@ -72,6 +72,18 @@ export interface SoundSink {
 	 * part of their delay (snd_pcm_delay).
 	 */
 	onChunk?: (chunk: SoundChunk) => number | void;
+	/**
+	 * Worker mode with shared memory: receives the shared PCM ring buffer once the
+	 * kernel starts (sound-ring.ts). When set and shared memory is active, PCM
+	 * chunks remain in the ring for the consumer's SoundRingReader (exactly
+	 * one) rather than being drained into onChunk; otherwise (inline or
+	 * shared: false) onChunk receives chunks as usual, and a sink without it
+	 * gets no PCM. The ring also holds a record per state change, in order
+	 * with the PCM (a reader that was not reading meets the old stream's
+	 * records first), and the reader reports the frames it has queued with
+	 * setQueuedFrames(), which the guest sees as the stream's delay.
+	 */
+	onRing?: (ring: SharedArrayBuffer) => void;
 	/** The state changed (open, format, start, stop, close). */
 	onState?: (state: SoundState, event: SoundEvent) => void;
 }

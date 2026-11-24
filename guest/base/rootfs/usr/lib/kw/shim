@@ -141,6 +141,19 @@ ls /lib/ld-musl-* >/dev/null 2>&1 && libc=-musl
 awk '$2 == "00000000" { f = 1 } END { exit !f }' /proc/net/route 2>/dev/null ||
 	die "not installed yet, and installing it needs a network (this machine has none)"
 
+# The page's mirror: where the page routes mirror.unkernel.dev (the name then
+# resolves into 198.51.100.0/24; web/src/config.ts DEFAULT_ROUTES), plain
+# HTTP to it is answered by the page's own fetch() and never crosses the
+# network, so the files below that it has (glibc arm64 builds) come from it
+# first, then from their upstreams. Nowhere else: nothing here is checked
+# against a checksum, and plain HTTP would cross the network.
+M=
+case $(getent hosts mirror.unkernel.dev 2>/dev/null | sed -n '1s/[[:space:]].*//p') in
+198.51.100.*) [ "$plat$libc" = arm64 ] && M=http://mirror.unkernel.dev ;;
+esac
+# mget MIRROR_PATH URL: the body from the mirror, else from URL.
+mget() { { [ -n "$M" ] && get "$M/$1" 2>/dev/null; } || get "$2"; }
+
 mkdir -p "$bin" || die "cannot create $bin"
 exec 9>"/tmp/.kw-shim-$name.lock" && flock 9 || die "cannot lock /tmp/.kw-shim-$name.lock"
 installed && run "$@"  # another call installed it while this one waited
@@ -152,7 +165,7 @@ installed && run "$@"  # another call installed it while this one waited
 # its programs are in $part/$top/$tbin; with $dir = ~/.local/bin, each of
 # links is moved there instead; links: its programs for ~/.local/bin, or the
 # names in ~/.local/bin for $dir/$file, $tool when empty)
-top= links= tbin=bin/
+top= links= tbin=bin/ alt=
 case $name in
 fx)
 	ver=${KW_FX_VERSION:-latest}
@@ -164,7 +177,10 @@ fx)
 claude)
 	B=https://downloads.claude.ai/claude-code-releases
 	ver=${KW_CLAUDE_VERSION:-latest}
-	case $ver in stable|latest) ver=$(get "$B/$ver") || die "cannot reach downloads.claude.ai" ;; esac
+	case $ver in
+	latest) ver=$(mget claude/claude-code-releases/latest "$B/latest") || die "cannot reach downloads.claude.ai" ;;
+	stable) ver=$(get "$B/$ver") || die "cannot reach downloads.claude.ai" ;;
+	esac
 	case $ver in [0-9]*.[0-9]*.[0-9]*) ;; *) die "unexpected version '$ver'" ;; esac
 	# The .zst is a third of the size (127 against 357 MB for 2.1.327, TLS
 	# 10 s, zstd 7 s, measured under kwemu on Alpine, 2026-11-18), and its
@@ -172,13 +188,14 @@ claude)
 	# Debian's image has it.
 	pkg zstd || die "not installed yet, and installing it needs zstd (sudo apk add zstd)"
 	url=$B/$ver/linux-$plat$libc/claude.zst
+	[ -z "$M" ] || { alt=$url; url=$M/claude/claude-code-releases/$ver/linux-arm64/claude.zst; }
 	dir=$HOME/.local/share/claude/versions file=$ver size=400000000
 	unpack() { zstd -dcq; } ;;
 opencode)
 	scope=@opencode
 	ver=${KW_OPENCODE_VERSION:-}
 	if [ -z "$ver" ]; then
-		m=$(get https://opencode.ai/update/api/latest/cli/npm) || die "cannot reach opencode.ai"
+		m=$(mget opencode/update/api/latest/cli/npm https://opencode.ai/update/api/latest/cli/npm) || die "cannot reach opencode.ai"
 		ver=$(printf %s "$m" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
 		pkg=$(printf %s "$m" | sed -n 's/.*"package":"\([^"]*\)".*/\1/p')
 		[ -n "$ver" ] && [ -n "$pkg" ] || die "unexpected answer from opencode.ai"
@@ -216,6 +233,7 @@ node)
 	esac
 	top=node-v$ver-$p
 	url=$N/v$ver/$top.tar.gz
+	[ -z "$M" ] || { alt=$url; url=$M/nodejs/dist/v$ver/$top.tar.gz; }
 	dir=$HOME/.local/share/node file=v$ver size=240000000 links="node npm npx"
 	unpack() { tar -xzof - -C "$part"; }  # -o: not the tarball's owners
 	# The musl build links libgcc_s (not in Alpine's image), the glibc one
@@ -241,11 +259,12 @@ bun)
 uv)
 	ver=${KW_UV_VERSION:-}
 	if [ -z "$ver" ]; then
-		ver=$(get https://astral.sh/uv/install.sh | sed -n 's/^APP_VERSION="\([^"]*\)"$/\1/p') || die "cannot reach astral.sh"
+		ver=$(mget astral/uv/install.sh https://astral.sh/uv/install.sh | sed -n 's/^APP_VERSION="\([^"]*\)"$/\1/p') || die "cannot reach astral.sh"
 	fi
 	case $ver in [0-9]*.[0-9]*.[0-9]*) ;; *) die "unexpected version '$ver'" ;; esac
 	if [ -n "$libc" ]; then top=uv-$fxarch-unknown-linux-musl; else top=uv-$fxarch-unknown-linux-gnu; fi
 	url=https://releases.astral.sh/github/uv/releases/download/$ver/$top.tar.gz
+	[ -z "$M" ] || { alt=$url; url=$M/github/astral-sh/uv/releases/download/$ver/$top.tar.gz; }
 	# 33 MB unpacked for the glibc build of 0.13.9, 36 MB for the musl one.
 	dir=$bin file=uv size=48000000 links="uvx uv" tbin=
 	unpack() { tar -xzof - -C "$part"; } ;;
@@ -293,16 +312,26 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT HUP
 trap 'exit 143' TERM
+# fetch URL: download and unpack it; the pipeline's status in rc.
+fetch() {
+	if [ -n "$top" ]; then
+		(get "$1" | unpack) &
+	else
+		(get "$1" | unpack > "$part") &
+	fi
+	pp=$!
+	wait $pp
+	rc=$?
+	pp=
+}
 say "installing $name $ver ($url)"
-if [ -n "$top" ]; then
-	(get "$url" | unpack) &
-else
-	(get "$url" | unpack > "$part") &
+fetch "$url"
+if [ $rc != 0 ] && [ -n "$alt" ]; then
+	say "the mirror failed; from $alt"
+	[ -z "$top" ] || { rm -rf "$part"; mkdir "$part" || die "cannot create $part"; }
+	url=$alt
+	fetch "$url"
 fi
-pp=$!
-wait $pp
-rc=$?
-pp=
 [ $rc = 0 ] || die "download failed: $url"
 elf=$part
 [ -z "$top" ] || elf=$part/$top/$tbin$name

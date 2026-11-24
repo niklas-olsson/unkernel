@@ -94,6 +94,33 @@ OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 SUCH DAMAGE.
 ```
 
+## The guest Vulkan translator (`kwvk-naga.wasm`)
+
+unkernel's SPIR-V to WGSL translator ([vk/naga](vk/naga),
+GPL-2.0-or-later) compiled to wasm with the Rust crates locked in
+[vk/naga/Cargo.lock](vk/naga/Cargo.lock), which keep their own licenses;
+where a crate offers a choice, it is used under MIT.
+
+- **naga** (the gfx-rs/wgpu shader translator), MIT OR Apache-2.0:
+  Copyright (c) The gfx-rs developers.
+- Its dependencies in the wasm (`cargo tree --target
+  wasm32-unknown-unknown -e normal`), MIT OR Apache-2.0 unless noted:
+  arrayvec, bit-set, bit-vec, bitflags, cfg-if, equivalent, fixedbitset,
+  half, hashbrown, indexmap, log, num-traits, once_cell, petgraph,
+  rustc-hash, thiserror, unicode-width; zerocopy, BSD-2-Clause OR
+  Apache-2.0 OR MIT; libm, MIT; foldhash, Zlib; spirv (Copyright (c) The
+  Khronos Group Inc. and the gfx-rs developers) and codespan-reporting,
+  Apache-2.0 only (its text: <https://www.apache.org/licenses/LICENSE-2.0>).
+  The proc-macro crates (proc-macro2, quote, syn, thiserror-impl,
+  zerocopy-derive, unicode-ident) run only at build time.
+
+The guest's Vulkan ICD (`libvulkan_kw.so`, in the kernel bundle's base) is
+unkernel's own ([vk/icd](vk/icd), GPL-2.0-or-later), built against the
+Khronos Vulkan headers (Apache-2.0 OR MIT). It speaks wland's
+`wland_external_buffer_manager_v1` from an interface description written
+out by hand after wland's `protocol/wland-external-buffer-v1.xml`
+(MPL-2.0; [wland](https://github.com/pithings/wland)).
+
 ## The distro images
 
 Alpine Linux and Debian images hold those distributions' packages, which

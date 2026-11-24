@@ -20,11 +20,13 @@ declare const __KW_BUILD__: {
  * The page's kernel and distro images (vite.config.ts, web/scripts/kernel.ts
  * pageSource()): the base bundle's UP kernel and its SMP one (null without
  * an SMP patch), the guest GL renderer's virgl.mjs (null without one; fetched
- * only with the GL option), and the images, debian first.
+ * only with the GL option), the guest Vulkan renderer's kwvk-naga.wasm (null
+ * without it; fetched only with the Vulkan option), and the images, debian first.
  */
 declare module "virtual:unkernel-kernel" {
 	export const kernelUrl: URL;
 	export const kernelSmpUrl: URL | null;
 	export const glUrl: URL | null;
+	export const vkShaderUrl: URL | null;
 	export const distros: { name: string; url: string; size: number; imageId?: string }[];
 }

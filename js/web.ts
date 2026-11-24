@@ -42,7 +42,20 @@ export const bundledKernelUrl: URL = new URL("./unkernel.wasm", import.meta.url)
  */
 export const bundledGlUrl: URL = new URL("./virgl.mjs", import.meta.url);
 
-const platform = webPlatform(bundledKernelUrl, bundledGlUrl);
+/**
+ * The guest Vulkan renderer's SPIR-V to WGSL translator
+ * (createKernel({ vk: true })), next to this module. Fetched only at the
+ * guest's first Vulkan instance.
+ */
+export const bundledVkShaderUrl: URL = new URL("./kwvk-naga.wasm", import.meta.url);
+
+const platform = webPlatform(bundledKernelUrl, bundledGlUrl, {
+	shaderWasm: bundledVkShaderUrl,
+	load: async () => {
+		const [host, shader] = await Promise.all([import("./core/vk-host.ts"), import("./core/vk-shader.ts")]);
+		return { VkRenderer: host.VkRenderer, loadVkShader: shader.loadVkShader as (wasm: never) => Promise<unknown> };
+	},
+});
 
 /**
  * Load, compile and boot a kernel (default: the bundled one, which boots

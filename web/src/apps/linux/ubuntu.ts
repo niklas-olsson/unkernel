@@ -41,6 +41,8 @@ import type { TerminalApp } from "../types.ts";
 const VER = "26.10";
 const NAME = `ubuntu-base-${VER}-base-arm64.tar.gz`;
 const TARBALL_URL = `https://cdimage.ubuntu.com/ubuntu-base/releases/${VER}/release/${NAME}`;
+/** The page's own fetch: the mirror's copy, which sends CORS headers (cdimage.ubuntu.com sends none). */
+const TARBALL_MIRROR = `https://mirror.unkernel.dev/ubuntu/ubuntu-base/releases/${VER}/release/${NAME}`;
 const SHA256 = "8b7ea4ed71a92873f7f4e260a3defe0d9ed85cb69c0155b12414208f79fa0f2d";
 const SIZE = 36245313;
 
@@ -155,6 +157,6 @@ export default {
 	colors: ["#e95420", "#5e2750"],
 	needs: { net: true },
 	files: { "ubuntu.sh": { content: UBUNTU_SH, mode: 0o755 } },
-	downloads: [{ url: TARBALL_URL, sha256: SHA256, size: SIZE, path: NAME, unless: `${ROOT_SH}; ${OURS_SH}` }],
+	downloads: [{ url: TARBALL_MIRROR, cors: true, sha256: SHA256, size: SIZE, path: NAME, unless: `${ROOT_SH}; ${OURS_SH}` }],
 	commands: ["$SUDO ./ubuntu.sh"],
 } satisfies TerminalApp;
