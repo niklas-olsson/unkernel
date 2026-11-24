@@ -623,7 +623,14 @@ returns the guest command's exit status.
 ```sh
 pnpm build:web
 node test/desktop-trace.mjs --out trace.json -- /usr/bin/sha256sum /bin/bash
+node test/desktop-trace-report.mjs trace.json
 ```
+
+The last command reads a saved trace offline. It reports how many samples
+the ten listed sites account for in each ranking, the time spent taking the
+snapshots, and the input and Wayland events observed by the host page.
+The rankings cover the whole guest. For a guest renderer's response to one
+keypress, match the input to its handler in a guest Chromium trace.
 
 For an interactive capture, open the desktop with `?trace=1&cpus=2`.
 Run `await KW.trace.start("typing")` in the page console, interact with a
