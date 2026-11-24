@@ -420,8 +420,8 @@ keeps its raw address per process) and by command, process and user pc
 table on stderr. `--profile-root DIR` (a host copy of the guest's root, such
 as `vendor/build/distro/debian-root`) or `symbolizeProfile(report, read)`
 add the nearest ELF function symbol (.symtab, else .dynsym) and `symbols`.
-Time samples: a sampler
-thread (`js/node/sampler.ts`; Node only) sets IRQ 9 in every CPU's word
+For time samples a dedicated worker on Node or a cross-origin isolated
+browser (`js/core/sampler.ts`) sets IRQ 9 in every CPU's word
 `hz` times a second (default 1000) without a notify, so it needs a shared
 memory (the SMP kernel, `--cpus 2` or more; otherwise instruction samples
 only). kwemu stops at its next poll; the kernel records the pc, and from

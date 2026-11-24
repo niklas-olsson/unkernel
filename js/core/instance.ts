@@ -11,7 +11,7 @@ import type { CpuEndpoint, CpuInit } from "./cpu.ts";
 import type { DisplayFrame, DisplayHost, DisplayMode, DisplayOption, DisplaySize, DisplayStats } from "./display.ts";
 import type { Evdev, InputHost, InputState, InputStats } from "./input.ts";
 import type { JitStats, KwemuStats } from "./jit.ts";
-import type { ProfileOptions, ProfileReport, SamplerHandle, SamplerInit } from "./profile.ts";
+import type { ProfileOptions, ProfileReport, SamplerSpawner } from "./profile.ts";
 import type { SoundHost, SoundOption, SoundState, SoundStats } from "./sound.ts";
 import { VsockHost, type Vsock, type VsockStats } from "./vsock.ts";
 import { inlineShm, type Shm, type ShmClient, type ShmStats } from "./shm.ts";
@@ -271,8 +271,8 @@ export interface CreateKernelOptions {
 	 * Sample where guest user time goes (profile.ts; read it with
 	 * profile()): true, or the rates. Time samples need the kernel's memory
 	 * shared (the SMP kernel, `cpus` > 1) and a platform that starts a
-	 * sampler thread (Node); otherwise only instruction samples are taken
-	 * (with a log line). Default: off.
+	 * sampler worker (Node or a cross-origin isolated browser). Otherwise
+	 * only instruction samples are taken (with a log line). Default: off.
 	 */
 	profile?: boolean | ProfileOptions;
 	/**
@@ -388,7 +388,7 @@ export interface Platform {
 	/** A distro path or URL as a read-only disk spec (Node: a file or an http(s) URL; browsers: an absolute http(s) URL). */
 	distroSpec?: (src: string | URL) => DiskSpec;
 	/** Start the profiler's time sampler thread (profile.ts); without it there are no time samples. */
-	spawnSampler?: (init: SamplerInit) => SamplerHandle;
+	spawnSampler?: SamplerSpawner;
 	/** The wasm GL renderer's module (virgl.mjs, the `gl` option); without it `gl` needs a module or a renderer. */
 	glModule?: () => URL;
 	/** The guest Vulkan renderer (the `vk` option): its modules and the translator's wasm (kwvk-naga.wasm); web entry only. */

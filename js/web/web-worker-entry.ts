@@ -13,6 +13,7 @@ import { serveKernel } from "../core/worker-serve.ts";
 import type { ToWorker } from "../core/worker-protocol.ts";
 import { spawnWebCpu, webCpuBlocker } from "./cpu.ts";
 import { webDevices } from "./devices.ts";
+import { spawnWebSampler } from "./sampler.ts";
 
 /** The dedicated worker's global (the page's tsconfig has no webworker lib). */
 const scope = globalThis as unknown as {
@@ -22,4 +23,4 @@ const scope = globalThis as unknown as {
 serveKernel({
 	post: (msg, transfer) => scope.postMessage(msg, transfer ?? []),
 	listen: (handler) => scope.addEventListener("message", (e) => handler(e.data)),
-}, { devices: webDevices, spawnCpu: spawnWebCpu, whyNoCpus: webCpuBlocker });
+}, { devices: webDevices, spawnCpu: spawnWebCpu, whyNoCpus: webCpuBlocker, spawnSampler: spawnWebSampler });

@@ -18,6 +18,7 @@ import type { VkPlatform } from "../core/vk.ts";
 import { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB } from "./memory.ts";
 import { spawnWebCpu, webCpuBlocker } from "./cpu.ts";
 import { webDevices } from "./devices.ts";
+import { spawnWebSampler } from "./sampler.ts";
 import { spawnWebWorker } from "./worker.ts";
 
 export function webPlatform(defaultKernel: URL, glModule?: URL, vk?: VkPlatform): Platform {
@@ -31,6 +32,7 @@ export function webPlatform(defaultKernel: URL, glModule?: URL, vk?: VkPlatform)
 		defaultMemoryFallbackMiB: [...DEFAULT_MEMORY_FALLBACK_MIB],
 		spawnWorker: spawnWebWorker,
 		spawnCpu: spawnWebCpu,
+		spawnSampler: spawnWebSampler,
 		whyNoCpus: webCpuBlocker,
 		absoluteUrl: (src) => new URL(src, location.href).href,
 		devices: webDevices,

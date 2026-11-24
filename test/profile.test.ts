@@ -14,8 +14,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { setImmediate } from "node:timers/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Profiler, type SamplerSpawner } from "../js/core/profile.ts";
 import { PROFILE_ANON, PROFILE_UNKNOWN, createKernel, bundledKernelUrl, symbolizeProfile, type KernelHandle, type KernelInstance, type ProfileReport } from "../js/node.ts";
 
 const testKernel = process.env.UNKERNEL_TEST_KERNEL ? path.resolve(process.env.UNKERNEL_TEST_KERNEL) : undefined;
@@ -256,4 +258,90 @@ test("symbolizeProfile: a separate debug file (code segment with a truncated p_f
 	assert.equal(r.sites[0]!.symbol, "fn+0x10");
 	assert.equal(r.pages[0]!.symbol, "fn");
 	assert.deepEqual(r.symbols!.map((y) => [y.symbol, y.insnSamples]), [["fn", 3]]);
+});
+
+function attachSamplerFixture(throwsOnStart = false) {
+	const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+	const header = 64, view = new DataView(memory.buffer);
+	// A version 2 kw_prof header with one empty sample ring.
+	view.setUint32(header, 2, true);
+	view.setUint32(header + 16, 1, true); // CPU count
+	view.setUint32(header + 20, 1, true); // Record count per ring
+	view.setUint32(header + 24, 64, true); // Record bytes
+	view.setUint32(header + 28, 128, true); // Ring stride
+	view.setUint32(header + 32, 128, true); // Ring offset
+	const logs: string[] = [];
+	let fail: (error: Error) => void;
+	let ctl: Int32Array;
+	let stops = 0;
+	const spawn: SamplerSpawner = (init, onError) => {
+		if (throwsOnStart) throw new Error("cannot create sampler");
+		fail = onError;
+		ctl = new Int32Array(init.ctl);
+		return { stop: () => { stops++; } };
+	};
+	const p = new Profiler({ hz: 200, insns: 1000 });
+	assert.equal(p.attach({
+		memory, sharedMemory: true, cpus: 1, irqAddr: 32,
+		exports: { kw_prof: new WebAssembly.Global({ value: "i32" }, header) },
+		log: (msg) => logs.push(msg),
+	}, spawn), true);
+	return {
+		p, logs,
+		flags: () => view.getUint32(header + 4, true), stopCount: () => stops,
+		count: (ticks: number, missed: number) => {
+			Atomics.store(ctl, 1, ticks);
+			Atomics.store(ctl, 2, missed);
+		},
+		fail: (message: string) => fail(new Error(message)),
+	};
+}
+
+test("sampler construction and asynchronous load failures leave instruction sampling on", async (t) => {
+	const startup = attachSamplerFixture(true);
+	const load = attachSamplerFixture();
+	t.after(() => { startup.p.stop(); load.p.stop(); });
+	await setImmediate();
+	load.fail("cannot load sampler");
+	for (const [run, message] of [[startup, "cannot create sampler"], [load, "cannot load sampler"]] as const) {
+		const report = run.p.report();
+		assert.equal(run.flags(), 2);
+		assert.equal(report.timeSampling, false);
+		assert.equal(report.hz, 0);
+		assert.equal(report.timeSamplingError, message);
+		assert.ok(run.logs[0]?.includes(message));
+	}
+	assert.equal(load.stopCount(), 1);
+});
+
+test("sampler runtime failure preserves historical counts through stop", async (t) => {
+	const run = attachSamplerFixture();
+	t.after(() => run.p.stop());
+	run.count(3, 1);
+	await setImmediate();
+	run.fail("sampler crashed");
+	assert.equal(run.flags(), 2);
+	run.p.stop();
+	const report = run.p.report();
+	assert.equal(run.stopCount(), 1);
+	assert.equal(report.timeSampling, true);
+	assert.equal(report.timeSamplingError, "sampler crashed");
+	assert.equal(report.hz, 200);
+	assert.equal(report.totals.ticks, 3);
+	assert.equal(report.totals.missed, 1);
+});
+
+test("orderly stop retains counts without reporting a sampler error", (t) => {
+	const run = attachSamplerFixture();
+	t.after(() => run.p.stop());
+	run.count(4, 2);
+	run.p.stop();
+	run.fail("late worker event");
+	const report = run.p.report();
+	assert.equal(run.stopCount(), 1);
+	assert.equal(report.timeSampling, true);
+	assert.equal("timeSamplingError" in report, false);
+	assert.equal(report.totals.ticks, 4);
+	assert.equal(report.totals.missed, 2);
+	assert.deepEqual(run.logs, []);
 });

@@ -8,9 +8,9 @@
 // them on the kernel's thread (a timer, which runs at the kernel's 20 ms
 // yields and while it idles, and at exit) and aggregates them.
 //
-// - Time samples: a sampler thread (Platform.spawnSampler; Node:
-//   node/sampler.ts) sets WASM_IRQ_PROFILE in every CPU's word of pending
-//   interrupts `hz` times a second, without a notify (an idle CPU is not
+// - Time samples: a sampler thread (Platform.spawnSampler) sets
+//   WASM_IRQ_PROFILE in every CPU's word of pending interrupts `hz` times
+//   a second, without a notify (an idle CPU is not
 //   woken). kwemu sees the bit at its next block end, so a sample lands on
 //   the pc where user code stopped, with the block that ran before it
 //   (`prevBlockPc`: the stop pc is the next block's start, so the block
@@ -161,9 +161,12 @@ export interface ProfileCpu {
 
 export interface ProfileReport {
 	version: 2;
-	/** Time samples asked per second and CPU (0: none), and whether a sampler ran (a shared memory and a platform that starts one). */
+	/** Time samples requested per second and CPU (0: none). */
 	hz: number;
+	/** Whether the report includes a time sampler, including after an orderly stop or a failure after ticking. */
 	timeSampling: boolean;
+	/** A sampler startup or runtime failure. After a failure, any accumulated time samples are historical. */
+	timeSamplingError?: string;
 	/** The instruction period (0: none). */
 	insnPeriod: number;
 	/** Milliseconds from the start of sampling to this report. */
@@ -209,6 +212,9 @@ export interface SamplerInit {
 export interface SamplerHandle {
 	stop(): void;
 }
+
+/** Start the sampler. Report worker load or runtime failures after returning the handle. */
+export type SamplerSpawner = (init: SamplerInit, onError: (error: Error) => void) => SamplerHandle;
 
 /** What Profiler needs of the Kernel (kernel.ts). */
 export interface ProfiledKernel {
@@ -301,6 +307,7 @@ export function profileOff(k: ProfiledKernel): void {
 export class Profiler {
 	hz: number;
 	insns: number;
+	#timeSamplingError?: string;
 	k: ProfiledKernel | undefined;
 	addr = 0;
 	nr = 0;
@@ -339,7 +346,7 @@ export class Profiler {
 	 * kw_prof, start from what the rings hold now, and set what to sample.
 	 * False if the kernel has no profiler.
 	 */
-	attach(k: ProfiledKernel, spawnSampler?: (init: SamplerInit) => SamplerHandle): boolean {
+	attach(k: ProfiledKernel, spawnSampler?: SamplerSpawner): boolean {
 		const addr = profAddr(k);
 		if (addr === undefined) {
 			k.log("[host] profile: this kernel has no profiler (kw_prof); nothing is sampled");
@@ -377,10 +384,25 @@ export class Profiler {
 				this.sampler = spawnSampler!({
 					buffer: k.memory.buffer as unknown as SharedArrayBuffer, irq0: k.irqAddr ?? 0, words: addr + P_WORDS,
 					cpus, bit: dv.getUint32(addr + P_BIT, true), periodMs: 1000 / this.hz, ctl,
+				}, (error) => {
+					if (!this.sampler) return; // The kernel has already ended.
+					this.sampler.stop();
+					this.sampler = null;
+					const view = new DataView(k.memory.buffer);
+					view.setUint32(addr + P_FLAGS, view.getUint32(addr + P_FLAGS, true) & ~FLAG_TIME, true);
+					// Keep historical tick counts if the worker failed after it started.
+					const counters = this.ctl!;
+					if (!this.perCpu.some(({ cpu }) => Atomics.load(counters, 1 + cpu) !== 0)) {
+						this.hz = 0;
+						this.ctl = null;
+					}
+					this.#timeSamplingError = error.message || String(error);
+					k.log(`[host] profile: the sampler stopped (${this.#timeSamplingError}); instruction samples only from now on`);
 				});
 				flags |= FLAG_TIME;
 			} catch (e) {
-				k.log(`[host] profile: cannot start the sampler (${(e as Error)?.message ?? e}); instruction samples only`);
+				this.#timeSamplingError = (e as Error)?.message || String(e);
+				k.log(`[host] profile: cannot start the sampler (${this.#timeSamplingError}); instruction samples only`);
 				this.hz = 0;
 				this.ctl = null;
 			}
@@ -561,6 +583,7 @@ export class Profiler {
 			version: 2,
 			hz: this.hz,
 			timeSampling: !!this.ctl,
+			...(this.#timeSamplingError !== undefined ? { timeSamplingError: this.#timeSamplingError } : {}),
 			insnPeriod: this.insns,
 			durationMs: Math.round((this.tEnd || performance.now()) - this.t0),
 			cpus: this.perCpu.length,

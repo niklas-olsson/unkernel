@@ -37,7 +37,7 @@ import { ConsoleRing, ConsoleRingReader, newConsoleRing, type ConsoleFull } from
 import { ConsoleOrder, type CpuEndpoint, type CpuInit, type CpuMessage } from "./cpu.ts";
 import { DisplayHost, type DisplayMode, type DisplayOption } from "./display.ts";
 import { InputHost, type InputState } from "./input.ts";
-import { Profiler, profileOff, type ProfileOptions, type SamplerHandle, type SamplerInit } from "./profile.ts";
+import { Profiler, profileOff, type ProfileOptions, type SamplerSpawner } from "./profile.ts";
 import { JIT_MIRROR_WORDS, JitHost, jitBufFromMirror, jitStatsFromMirror, sumJitStats, type JitStats, type KwemuStats } from "./jit.ts";
 import { SoundHost, type SoundOption } from "./sound.ts";
 import { ShmDevice } from "./shm.ts";
@@ -236,7 +236,7 @@ export interface KernelConfig {
 	/** Sample guest pcs (profile.ts): time samples need spawnSampler and a shared memory. */
 	profile?: ProfileOptions;
 	/** Start the time sampler's thread (Platform.spawnSampler). */
-	spawnSampler?: (init: SamplerInit) => SamplerHandle;
+	spawnSampler?: SamplerSpawner;
 }
 
 /** Whether the linker's "target_features" section lists `feature`; undefined in a module without the section. */
