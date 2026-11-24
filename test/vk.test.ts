@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readTexture, type Conn } from "../js/core/vk-host.ts";
 import { loadVkShader } from "../js/core/vk-shader.ts";
 import { prepareVk, startVk, VK_PORT, type VkGpuDevice, type VkModules } from "../js/core/vk.ts";
 import type { Vsock, VsockConnection } from "../js/core/vsock.ts";
@@ -216,4 +217,44 @@ test("the translator: a compute shader to WGSL", { skip: !existsSync(wasm) && `n
 	assert.ok(bnd, JSON.stringify(r.bindings));
 	assert.equal(bnd.kind, "storage");
 	assert.throws(() => t.translate(new Uint8Array(16), { stage: "compute", entryPoint: "main" }));
+});
+
+test("Vulkan present readback releases staging after a failed map and packs rows on retry", async () => {
+	const events: string[] = [];
+	const error = new Error("map rejected");
+	const mapped = new Uint8Array(512);
+	mapped.set([1, 2, 3, 4]);
+	mapped.set([5, 6, 7, 8], 256);
+	const texture = {};
+	let fail = true;
+	const dev = {
+		createBuffer({ size }: { size: number }) {
+			assert.equal(size, mapped.length);
+			return {
+				async mapAsync() {
+					events.push("map");
+					if (fail) throw error;
+				},
+				getMappedRange: () => mapped.buffer,
+				unmap: () => events.push("unmap"),
+				destroy: () => events.push("destroy"),
+			};
+		},
+		createCommandEncoder: () => ({
+			copyTextureToBuffer(src: { texture: object }, dst: { bytesPerRow: number }, extent: number[]) {
+				assert.equal(src.texture, texture);
+				assert.equal(dst.bytesPerRow, 256);
+				assert.deepEqual(extent, [1, 2, 1]);
+			},
+			finish: () => ({}),
+		}),
+		queue: { submit: () => events.push("submit") },
+	};
+	const c = { dev } as Conn;
+	const frame = { tex: texture, info: { bpb: 4 } };
+	await assert.rejects(readTexture(c, frame, 0, 0, 1, 2), error);
+	assert.deepEqual(events.splice(0), ["submit", "map", "destroy"]);
+	fail = false;
+	assert.deepEqual(await readTexture(c, frame, 0, 0, 1, 2), Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8));
+	assert.deepEqual(events, ["submit", "map", "unmap", "destroy"]);
 });

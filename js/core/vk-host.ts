@@ -2044,16 +2044,19 @@ export async function readTexture(c: Conn, img: any, mip: number, layer: number,
 	const tight = w * bpb;
 	const stride = (tight + 255) & ~255;
 	const stage = c.dev.createBuffer({ size: stride * h, usage: BU.MAP_READ | BU.COPY_DST });
-	const e = c.dev.createCommandEncoder();
-	e.copyTextureToBuffer({ texture: img.tex, mipLevel: mip, origin: [0, 0, layer] }, { buffer: stage, bytesPerRow: stride, rowsPerImage: h }, [w, h, 1]);
-	c.dev.queue.submit([e.finish()]);
-	await stage.mapAsync(MAP_READ);
-	const src = new Uint8Array(stage.getMappedRange());
-	const out = new Uint8Array(tight * h);
-	for (let y = 0; y < h; y++) out.set(src.subarray(y * stride, y * stride + tight), y * tight);
-	stage.unmap();
-	stage.destroy();
-	return out;
+	try {
+		const e = c.dev.createCommandEncoder();
+		e.copyTextureToBuffer({ texture: img.tex, mipLevel: mip, origin: [0, 0, layer] }, { buffer: stage, bytesPerRow: stride, rowsPerImage: h }, [w, h, 1]);
+		c.dev.queue.submit([e.finish()]);
+		await stage.mapAsync(MAP_READ);
+		const src = new Uint8Array(stage.getMappedRange());
+		const out = new Uint8Array(tight * h);
+		for (let y = 0; y < h; y++) out.set(src.subarray(y * stride, y * stride + tight), y * tight);
+		stage.unmap();
+		return out;
+	} finally {
+		stage.destroy();
+	}
 }
 
 // --- render pipeline variants ---------------------------------------------
