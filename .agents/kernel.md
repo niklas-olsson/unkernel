@@ -407,8 +407,10 @@ through Binaryen (`wasm-opt -g --memory64-lowering --table64-lowering`,
 about 1 s) to make `vmlinux32.wasm`. Pointers stay i64 in the code and at
 the JS boundary, so imports, exports and JSPI are unchanged; only memory
 and table accesses are wrapped to i32, which is exact because RAM is below
-4 GiB. The runtime picks the memory type with `moduleIsMemory64()`, which
-reads the module's `target_features` section.
+4 GiB. The runtime picks the memory type with `moduleIsMemory64()` and a
+shared memory with `moduleIsSharedMemory()`, which read the module's
+`target_features` section. Without that section it uses the SMP startup
+import to choose the initial sharing.
 
 The lowered build runs at the same speed in V8, is about 20% faster in
 JavaScriptCore, and needs no memory64. The bundle, the page, the CLI's

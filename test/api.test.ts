@@ -2789,12 +2789,59 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 
 });
 
-// Run outside the concurrent suite because this observes the inline allocator.
-test("the SMP kernel boots on its first RAM allocation, even with one CPU", { skip: !hasSmpPatch }, async (t) => {
+// Hide just the optional target_features section, preserving the bundled initramfs.
+test("an SMP module without target_features allocates shared RAM on its first attempt", { skip: !hasSmpPatch }, async (t) => {
 	const kernel = await sdk.loadKernelModule(kernelBytes, { smp: true });
+	const memory64 = sdk.moduleIsMemory64(kernel);
+	const { customSections } = WebAssembly.Module;
+	t.mock.method(WebAssembly.Module, "customSections", (m: WebAssembly.Module, name: string) =>
+		m === kernel && name === "target_features" ? [] : customSections(m, name));
 	const allocate = t.mock.method(sdk.Kernel, "newMemory");
-	await boot(t, { kernel, cpus: 1, memoryMiB: 256, worker: false });
+	await boot(t, { kernel, memory64, cpus: 1, memoryMiB: 256, worker: false });
 	assert.deepEqual(allocate.mock.calls.map(({ arguments: [pages, , shared] }) => [pages, shared]), [[4096, true]]);
+});
+
+// Not with the others: it replaces WebAssembly.Memory, which every boot uses.
+test("SMP: the kernel's memory is allocated once, shared, at a boot and at a restore; memoryFallbackMiB applies where a shared memory cannot be had",
+	{ skip: !hasSmpPatch && "the kernel under test carries no SMP kernel" }, async (t) => {
+	const kernel = await sdk.loadKernelModule(readFileSync(kernelFile), { smp: true });
+	const { Memory } = WebAssembly;
+	const asked: string[] = [];
+	let maxSharedMiB = Infinity;
+	WebAssembly.Memory = new Proxy(Memory, {
+		construct(target, args: [WebAssembly.MemoryDescriptor], newTarget) {
+			const mib = Number(args[0].initial) / 16;
+			if (mib >= 128) asked.push(`${mib} MiB${args[0].shared ? " shared" : ""}`);
+			if (args[0].shared && mib > maxSharedMiB) throw new RangeError("could not allocate memory");
+			return Reflect.construct(target, args, newTarget) as WebAssembly.Memory;
+		},
+	});
+	try {
+		const opts = { kernel, cpus: 1, worker: false, vsock: false, log: () => {} };
+		const vm = await boot(t, { ...opts, memoryMiB: 512 });
+		const a = screen(vm);
+		await a.waitFor(PROMPT);
+		// Saved once init is done starting the shell (as above).
+		vm.write("echo up-$((6*7))\n");
+		await a.waitFor(/up-42/);
+		const snap = await vm.snapshot({ stop: true });
+		assert.deepEqual(asked.splice(0), ["512 MiB shared"]);
+
+		const vm2 = await boot(t, { ...opts, restore: snap });
+		const b = screen(vm2);
+		vm2.write("echo restored-$((6*7))\n");
+		await b.waitFor(/restored-42/);
+		await vm2.stop({ reason: "test" });
+		assert.deepEqual(asked.splice(0), ["512 MiB shared"]);
+
+		maxSharedMiB = 256;
+		const vm3 = await boot(t, { ...opts, memoryMiB: 512, memoryFallbackMiB: [384, 256] });
+		await screen(vm3).waitFor(PROMPT);
+		assert.equal(vm3.memoryMiB, 256);
+		assert.deepEqual(asked, ["512 MiB shared", "384 MiB shared", "256 MiB shared"]);
+	} finally {
+		WebAssembly.Memory = Memory;
+	}
 });
 
 // Not with the others: it changes globalThis.crossOriginIsolated, which every worker-mode boot reads.

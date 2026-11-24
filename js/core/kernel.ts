@@ -239,6 +239,27 @@ export interface KernelConfig {
 	spawnSampler?: (init: SamplerInit) => SamplerHandle;
 }
 
+/** Whether the linker's "target_features" section lists `feature`; undefined in a module without the section. */
+function moduleFeature(module: WebAssembly.Module, feature: string): boolean | undefined {
+	const secs = WebAssembly.Module.customSections(module, "target_features");
+	if (!secs.length) return undefined;
+	const b = new Uint8Array(secs[0]!);
+	let p = 0;
+	const leb = () => {
+		let v = 0, s = 0, c;
+		do { c = b[p++]!; v |= (c & 0x7f) << s; s += 7; } while (c & 0x80);
+		return v;
+	};
+	for (let n = leb(); n > 0 && p < b.length; n--) {
+		const prefix = String.fromCharCode(b[p++]!);
+		const len = leb();
+		const name = textDecoder.decode(b.subarray(p, p + len));
+		p += len;
+		if (name === feature) return prefix !== "-";
+	}
+	return false;
+}
+
 /**
  * Does this kernel module import a 64-bit (memory64) memory?
  *
@@ -252,23 +273,17 @@ export interface KernelConfig {
  * boot() retries with the other memory type if instantiation fails.
  */
 export function moduleIsMemory64(module: WebAssembly.Module): boolean {
-	const secs = WebAssembly.Module.customSections(module, "target_features");
-	if (!secs.length) return true;
-	const b = new Uint8Array(secs[0]!);
-	let p = 0;
-	const leb = () => {
-		let v = 0, s = 0, c;
-		do { c = b[p++]!; v |= (c & 0x7f) << s; s += 7; } while (c & 0x80);
-		return v;
-	};
-	for (let n = leb(); n > 0 && p < b.length; n--) {
-		const prefix = String.fromCharCode(b[p++]!);
-		const len = leb();
-		const name = textDecoder.decode(b.subarray(p, p + len));
-		p += len;
-		if (name === "memory64") return prefix !== "-";
-	}
-	return false;
+	return moduleFeature(module, "memory64") ?? true;
+}
+
+/**
+ * Does this kernel module import a shared memory? A guess from its wasm
+ * atomics, which --shared-memory needs and the UP kernel does without (a
+ * KW_ATOMICS=1 build has them on an unshared memory). Without that section,
+ * use the SMP startup import. boot() retries if the sharing guess is wrong.
+ */
+function moduleIsSharedMemory(module: WebAssembly.Module, smp: boolean): boolean {
+	return moduleFeature(module, "atomics") ?? smp;
 }
 
 /**
@@ -428,9 +443,7 @@ export class Kernel {
 		this.stats = { switches: 0, idles: 0, yields: 0 };
 		this.block = new BlockHost(this, opts.disks ?? []);
 		const smp = WebAssembly.Module.imports(opts.module).some((i) => i.module === "unkernel" && i.name === "wasm_cpu_start");
-		// The SMP module needs shared RAM even on one CPU. Allocating unshared
-		// RAM first can leave too little address space for the real allocation.
-		this.sharedMemory = smp;
+		this.sharedMemory = moduleIsSharedMemory(opts.module, smp);
 		const cpus = Math.max(1, Math.floor(opts.cpus ?? 1));
 		if (cpus > 1 && !smp) this.log(`[host] this kernel is not SMP: ${cpus} CPUs asked, it runs on one`);
 		else if (cpus > 1 && !opts.spawnCpu) this.log("[host] this platform cannot start CPU threads: the SMP kernel runs on one CPU");
@@ -1207,10 +1220,11 @@ export class Kernel {
 		});
 
 		this.onStage("instantiate");
-		// A custom module can import different sharing than its CPU imports
-		// suggest. Retry once if the engine reports that mismatch, and, for a
-		// guessed memory type (a module without target_features), once with
-		// the other type.
+		// The JS API does not show whether the memory import is shared (a
+		// kernel linked with --shared-memory), so that is a guess
+		// (moduleIsSharedMemory): retry once with the other sharing when the
+		// engine says it was wrong; and, for a guessed memory type (a module
+		// without target_features), once with the other type.
 		let instance: WebAssembly.Instance | undefined;
 		let flippedShared = false, flippedType = !guessed;
 		while (!instance) {
