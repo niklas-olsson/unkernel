@@ -236,7 +236,8 @@ function installedTest(d: TerminalApp): string {
  * for it: nothing (and no output) when they are all installed, else the
  * install, each step printed (dim, after a $) before it runs. With KW_STATUS
  * set (the installer, launcher.ts) apt also writes its status lines
- * (APT::Status-Fd) to stdout, which installer.ts packageParser() reads.
+ * (APT::Status-Fd) into the same output, which installer.ts packageParser()
+ * reads.
  */
 export function installScript(d: TerminalApp): string | null {
 	const test = installedTest(d);
@@ -257,9 +258,17 @@ export function installScript(d: TerminalApp): string | null {
 		// when the install still fails, again with `apt-get install -f` (which
 		// mends half-installed dependencies) before the last try. The lock
 		// timeout makes two apps installed at once take turns rather than fail.
-		// Status-Fd=1: sudo closes the descriptors from 3 up.
-		const get = `$SUDO apt-get install -y -q -o DPkg::Lock::Timeout=600 \${KW_STATUS:+-o APT::Status-Fd=1} --no-install-recommends ${pk} </dev/null`;
-		install = `[ -z "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || {\n` +
+		// Status-Fd=3, a copy of stdout: apt starts dpkg without the status
+		// descriptor, so with 1 the packages' scripts have no stdout and their
+		// echo fails ("I/O error"; under set -e the install too). Opened inside
+		// sudo, which closes the descriptors from 3 up.
+		const get = `get install -y -q -o DPkg::Lock::Timeout=600 --no-install-recommends ${pk} </dev/null`;
+		install = `get() {
+	if [ -n "$KW_STATUS" ]; then $SUDO sh -c 'exec apt-get -o APT::Status-Fd=3 "$@" 3>&1' sh "$@"
+	else $SUDO apt-get "$@"; fi
+}
+` +
+			`[ -z "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || {\n` +
 			step("$SUDO dpkg --configure -a   # finish an interrupted install", "$SUDO dpkg --configure -a </dev/null || true") +
 			`}\n` +
 			step(`$SUDO apt-get install ${pkgs.join(" ")}`, `${get} ||\n` +
