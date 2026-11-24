@@ -184,6 +184,12 @@ In order, each with its reason in the commit message:
     fatal one such call put the context in error for good (Firefox's window
     went blank). `GL_OUT_OF_MEMORY` still puts the context in error, as do
     vrend's own checks of the guest's commands.
+20. expose twelve guest uniform blocks per shader stage on WebGL2 hosts
+    with twelve per-stage blocks, at least 24 combined slots and bindings,
+    and room for the renderer's system values in ordinary uniforms. This
+    lets Mesa create GLES 3 contexts on the Windows ANGLE D3D11 backend.
+    `test/gl/kwgl-ubo12.c` checks both pixels of two draws with twelve
+    distinct buffers bound in each stage.
 
 ## Single GL context
 

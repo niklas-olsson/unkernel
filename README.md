@@ -159,6 +159,17 @@ sudo apt-get install -y xvfb xauth glmark2-es2-x11
 xvfb-run -a -s "-screen 0 640x480x24" glmark2-es2   # frame rates
 ```
 
+To build the page with this checkout's renderer and the released kernel,
+run these commands on the host from a fresh checkout. This includes the
+GLES 3 fix for Windows ANGLE D3D11 devices with twelve uniform blocks per
+shader stage.
+
+```sh
+pnpm install --frozen-lockfile
+gl/wasm/build.sh module
+KW_LOCAL=0 KW_GL="$PWD/vendor/build/gl-wasm" pnpm build:web
+```
+
 Wayland apps show as windows on the page: `wland foot` (or the
 launcher's foot tile) starts wland's relay in the guest and runs the app
 against it; [wland](https://github.com/pithings/wland)'s compositor runs in
