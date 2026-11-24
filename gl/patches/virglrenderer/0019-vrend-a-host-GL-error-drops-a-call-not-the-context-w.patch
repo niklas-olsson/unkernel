@@ -1,0 +1,102 @@
+From 113b27c9f8e0567dc02807135644ba0c173116be Mon Sep 17 00:00:00 2001
+From: Pooya Parsa <pooya@pi0.io>
+Date: Tue, 24 Nov 2026 17:59:29 +0000
+Subject: [PATCH] vrend: a host GL error drops a call, not the context, without
+ CHECK_GL_ERRORS
+
+Without CHECK_GL_ERRORS a host GL error was a warning, which a release
+build does not print, and nothing counted it. WebGL refuses calls that
+GLES leaves undefined (a texture both sampled and rendered into, a
+texture of another type than its sampler, a vertex buffer too small for
+a draw), and with CHECK_GL_ERRORS one such call put the context in error
+for good.
+
+Now such an error is logged as an error (the first eight, then each time
+the count doubles) and counted (vrend_renderer_host_gl_errors()): the
+host dropped the call and its state is as before it. GL_OUT_OF_MEMORY,
+which leaves the GL state undefined, still puts the context in error.
+---
+ src/vrend/vrend_renderer.c | 31 ++++++++++++++++++++++++-------
+ src/vrend/vrend_renderer.h |  3 +++
+ 2 files changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index ad5abd2..addcca9 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -424,6 +424,9 @@ struct global_renderer_state {
+     * are multisample renderbuffers, which can be rendered to, cleared and
+     * blitted (resolved) from, but not sampled */
+    bool ms_renderbuffers : 1;
++
++   /* host GL errors that were not fatal (no CHECK_GL_ERRORS) */
++   uint32_t host_gl_errors;
+ };
+ 
+ struct sysval_uniform_block {
+@@ -7616,8 +7619,14 @@ static enum virgl_resource_fd_type vrend_pipe_resource_export_fd(UNUSED struct p
+    return VIRGL_RESOURCE_FD_INVALID;
+ }
+ 
++uint32_t vrend_renderer_host_gl_errors(void)
++{
++   return vrend_state.host_gl_errors;
++}
++
+ bool vrend_check_no_error(struct vrend_context *ctx)
+ {
++   bool ok = true;
+    GLenum err;
+ 
+    err = glGetError();
+@@ -7626,18 +7635,26 @@ bool vrend_check_no_error(struct vrend_context *ctx)
+ 
+    while (err != GL_NO_ERROR) {
+ #ifdef CHECK_GL_ERRORS
+-      vrend_report_context_error(ctx, VIRGL_ERROR_CTX_UNKNOWN, err);
++      const bool fatal = true;
+ #else
+-      virgl_warn("GL error reported (%d) for context %d\n", err, ctx->ctx_id);
++      /* the host dropped the call that raised any other error, and its
++       * state is as before that call */
++      const bool fatal = err == GL_OUT_OF_MEMORY;
+ #endif
++      if (fatal) {
++         vrend_report_context_error(ctx, VIRGL_ERROR_CTX_UNKNOWN, err);
++         ok = false;
++      } else {
++         /* the first eight, then each time the count doubles */
++         const uint32_t n = ++vrend_state.host_gl_errors;
++         if (n <= 8 || !(n & (n - 1)))
++            virgl_error("GL error 0x%x in context %d \"%s\": the host dropped a call (%u so far)\n",
++                        err, ctx->ctx_id, ctx->debug_name, n);
++      }
+       err = glGetError();
+    }
+ 
+-#ifdef CHECK_GL_ERRORS
+-   return false;
+-#else
+-   return true;
+-#endif
++   return ok;
+ }
+ 
+ const struct virgl_resource_pipe_callbacks *
+diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
+index 7e48382..45eeddf 100644
+--- a/src/vrend/vrend_renderer.h
++++ b/src/vrend/vrend_renderer.h
+@@ -206,6 +206,9 @@ struct vrend_if_cbs {
+ #define VREND_USE_COARSE_GL_ERRORS (1 << 9)
+ 
+ bool vrend_check_no_error(struct vrend_context *ctx);
++/* Host GL errors that only dropped a call: without CHECK_GL_ERRORS every one
++ * but GL_OUT_OF_MEMORY, which still puts the context in error. */
++uint32_t vrend_renderer_host_gl_errors(void);
+ /* GL errors are checked once per command buffer (VREND_USE_COARSE_GL_ERRORS) */
+ bool vrend_renderer_coarse_gl_errors(void);
+ 
+-- 
+2.56.1
+

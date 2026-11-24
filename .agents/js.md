@@ -1421,7 +1421,9 @@ parts that are easy to get wrong.
   WorkerKernel.frame()/readFrame() use it while a 3D resource is on the
   scanout; for screenshots, not per frame). `onFrame` hears each present
   and scanout change; `stats` (also `vm.gl.stats.gpu`) counts commands,
-  fenced answers, parks and time parked, presents, readbacks and errors,
+  fenced answers, parks and time parked, presents, readbacks, errors and
+  `glErrors` (WebGL errors of guests' commands: calls WebGL dropped, the
+  context going on; gl.md, Patches, 19),
   with `lastError` (the latest failed command, its context and resource,
   the answer and why; failures are logged at most once a second) and
   `contextLost`, `losses`, `renewals`. A lost WebGL2 context

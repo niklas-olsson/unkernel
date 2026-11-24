@@ -693,6 +693,7 @@ _Static_assert(sizeof(struct virgl_caps_v1) == KW_VGPU_CAPSET_VIRGL_SIZE, "struc
 _Static_assert(sizeof(struct virgl_caps_v2) == KW_VGPU_CAPSET_VIRGL2_SIZE, "struct virgl_caps_v2 changed: update KW_VGPU_CAPSET_VIRGL2_SIZE and VIRGL_CAPSETS (js/core/gl-gpu.ts)");
 
 void vrend_renderer_single_enter_blitter(void);
+uint32_t vrend_renderer_host_gl_errors(void);
 
 #define KW_VGPU_CTX_BASE 0x40000000u
 
@@ -943,6 +944,11 @@ EMSCRIPTEN_KEEPALIVE uint32_t kw_vgpu_fences_done(void)
 	return done;
 }
 
+EMSCRIPTEN_KEEPALIVE uint32_t kw_vgpu_gl_errors(void)
+{
+	return vrend_renderer_host_gl_errors();
+}
+
 // What the host needs of a resource: OUT[0] the GL texture (0: none, e.g. a
 // buffer), [1] width, [2] height, [3] the virgl format, [4] 1 when row 0 is
 // the top (VIRGL_RESOURCE_Y_0_TOP), [5] 1 when the format has alpha (not an
@@ -1048,7 +1054,7 @@ EMSCRIPTEN_KEEPALIVE int kw_vgpu_blit(uint32_t res, uint32_t x, uint32_t y, uint
 	}
 	// An error of this blit (or one a transfer left, which vrend does not
 	// check) would be charged to the next command buffer of whichever
-	// context comes next, which it puts in error: take it here and say so.
+	// context comes next, as that context's: take it here and say so.
 	// One glGetError (a round trip in WebGL) per present or image.
 	host_gl_errors("blit of resource", res);
 	return 0;

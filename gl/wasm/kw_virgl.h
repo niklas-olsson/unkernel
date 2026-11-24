@@ -115,6 +115,10 @@ uint32_t kw_vgpu_format(uint32_t format);
 // last one retired.
 uint32_t kw_vgpu_fence(void);
 uint32_t kw_vgpu_fences_done(void);
+// The host GL errors of guests' commands so far: each one a call the host
+// dropped (WebGL refuses calls that GLES leaves undefined), logged, with the
+// context going on. Only GL_OUT_OF_MEMORY puts a context in error.
+uint32_t kw_vgpu_gl_errors(void);
 // A resource's texture, width, height, virgl format, Y_0_TOP and whether
 // the format has alpha (OUT has 6 words); 0 or -ENOENT.
 int kw_vgpu_info(uint32_t res, uint32_t *out);

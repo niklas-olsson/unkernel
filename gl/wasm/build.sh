@@ -148,7 +148,7 @@ build_lib() {
 	done
 	local opts=(-Dbuildtype=release -Db_ndebug=true
 		-Dplatforms=auto -Dvenus=false -Ddrm-renderers=[] -Dvideo=false
-		-Dtests=false -Dfuzzer=false -Dtracing=none -Dcheck-gl-errors=true)
+		-Dtests=false -Dfuzzer=false -Dtracing=none -Dcheck-gl-errors=false)
 	# meson reads cross files only at setup: set up afresh when they or the
 	# options change
 	local stamp
@@ -194,7 +194,7 @@ build_module() {
 		-sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 \
 		-sGL_EMULATE_GLES_VERSION_STRING_FORMAT=1 -sGL_EXTENSIONS_IN_PREFIXED_FORMAT=1 \
 		-sGL_SUPPORT_AUTOMATIC_ENABLE_EXTENSIONS=1 \
-		-sEXPORTED_FUNCTIONS=_kw_virgl_init,_kw_virgl_open,_kw_virgl_close,_kw_virgl_feed,_kw_virgl_poll,_kw_virgl_reply_ptr,_kw_virgl_reply_len,_kw_virgl_consume,_kw_virgl_state,_kw_virgl_stats,_kw_vgpu_command,_kw_vgpu_capset,_kw_vgpu_format,_kw_vgpu_fence,_kw_vgpu_fences_done,_kw_vgpu_info,_kw_vgpu_blit,_kw_vgpu_present,_kw_vgpu_read,_malloc,_free \
+		-sEXPORTED_FUNCTIONS=_kw_virgl_init,_kw_virgl_open,_kw_virgl_close,_kw_virgl_feed,_kw_virgl_poll,_kw_virgl_reply_ptr,_kw_virgl_reply_len,_kw_virgl_consume,_kw_virgl_state,_kw_virgl_stats,_kw_vgpu_command,_kw_vgpu_capset,_kw_vgpu_format,_kw_vgpu_fence,_kw_vgpu_fences_done,_kw_vgpu_gl_errors,_kw_vgpu_info,_kw_vgpu_blit,_kw_vgpu_present,_kw_vgpu_read,_malloc,_free \
 		-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32 \
 		'-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=$GL' \
 		--js-library "$here/kw_gl.js" --post-js "$here/post.js" ${KW_LDFLAGS:-}
@@ -204,7 +204,7 @@ build_module() {
 build_native() {
 	need meson ninja pkg-config cc
 	local m="$build/gl-native"
-	local opts=(-Dplatforms=egl -Dtests=false -Dbuildtype=debugoptimized)
+	local opts=(-Dplatforms=egl -Dtests=false -Dbuildtype=debugoptimized -Dcheck-gl-errors=false)
 	if [ ! -f "$m/build.ninja" ] || [ "$(cat "$m/kw-setup" 2>/dev/null)" != "${opts[*]}" ]; then
 		rm -rf "$m"
 		meson setup "$m" "$src" "${opts[@]}"

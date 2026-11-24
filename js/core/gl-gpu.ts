@@ -570,6 +570,8 @@ export interface VirglGpuApi {
 	format(f: number): number;
 	fence(): number;
 	fencesDone(): number;
+	/** Host GL errors of guests' commands so far (GpuRendererStats.glErrors). Absent in a module from before it. */
+	glErrors?(): number;
 	info(res: number): { texture: WebGLTexture | null; width: number; height: number; format: number; yTop: boolean; alpha?: boolean } | null;
 	/** Absent in a module from before window images (GpuRenderer.image() then gives null). */
 	blit?(res: number, x: number, y: number, w: number, h: number, flags?: number): number;
@@ -647,7 +649,13 @@ export interface GpuRendererStats {
 	/** Commands the renderer refused or could not run (logged, at most one line a second). */
 	errors: number;
 	/**
-	 * The latest of those, for a device without DevTools: the command, its
+	 * WebGL errors raised by guests' commands: each one a call WebGL dropped
+	 * (it refuses calls GLES leaves undefined), with the guest's context
+	 * going on; the renderer logs them ("[gl] virgl: ... GL error 0x502 ...").
+	 */
+	glErrors: number;
+	/**
+	 * The latest of the commands that failed, for a device without DevTools: the command, its
 	 * context and resource, the answer and why ("" while none failed), e.g.
 	 * "SUBMIT_3D ctx 1: 0x1200, the renderer refused it (...)".
 	 */
@@ -719,7 +727,7 @@ export interface GpuScanout {
 export class GpuRenderer {
 	/** The capsets and the format table once the renderer is up (after start()); rejects if it cannot be. */
 	readonly init: Promise<GpuInit>;
-	stats: GpuRendererStats = { commands: 0, fenced: 0, parks: 0, parkedMs: 0, presents: 0, reads: 0, images: 0, errors: 0, lastError: "", contextLost: false, losses: 0, renewals: 0 };
+	stats: GpuRendererStats = { commands: 0, fenced: 0, parks: 0, parkedMs: 0, presents: 0, reads: 0, images: 0, errors: 0, glErrors: 0, lastError: "", contextLost: false, losses: 0, renewals: 0 };
 	/** A new frame was presented, or the scanout changed. */
 	onFrame: (() => void) | undefined;
 	#load: () => Promise<GpuRendererCore>;
@@ -739,6 +747,8 @@ export class GpuRenderer {
 	#idle = new Set<number>();
 	/** Contexts that submitted commands (they hold objects in the renderer). */
 	#submitted = new Set<number>();
+	/** The current core's glErrors() as of the last submit. */
+	#glErrorsSeen = 0;
 	#renewFailedAt = -Infinity;
 	/** Error lines: when the last was logged, and how many were left out since. */
 	#errorLogAt = -Infinity;
@@ -1008,6 +1018,11 @@ export class GpuRenderer {
 				// A submit that fails may have made objects before the command that failed.
 				if (type === GPU_CMD.SUBMIT_3D) this.#submitted.add(dv.getUint32(16, true));
 				code = c.gpu.command(req.cmd, req.data);
+				if (type === GPU_CMD.SUBMIT_3D && c.gpu.glErrors) {
+					const n = c.gpu.glErrors();
+					this.stats.glErrors += (n - this.#glErrorsSeen) >>> 0;
+					this.#glErrorsSeen = n;
+				}
 				if (!code) {
 					if (type === GPU_CMD.RESOURCE_CREATE_3D) this.#resources.add(dv.getUint32(HDR, true));
 					else if (type === GPU_CMD.RESOURCE_UNREF) {
@@ -1084,6 +1099,7 @@ export class GpuRenderer {
 	/** A core is the current one: listen for its context's loss. */
 	#attach(c: GpuRendererCore): void {
 		this.#core = c;
+		this.#glErrorsSeen = c.gpu.glErrors?.() ?? 0;
 		this.#listening?.abort();
 		const ac = new AbortController();
 		this.#listening = ac;

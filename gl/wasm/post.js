@@ -27,7 +27,7 @@
 // timerPolls).
 //
 // v.gpu is the virtio-gpu entry (kw_vgpu_*): command(), capset(), format(),
-// fence(), fencesDone(), info(), blit(), present(), read(); see below.
+// fence(), fencesDone(), glErrors(), info(), blit(), present(), read(); see below.
 
 Module['virgl'] = (() => {
   let scratch = 0, scratchSize = 0, initGL = null;
@@ -122,6 +122,7 @@ Module['virgl'] = (() => {
       format: (f) => _kw_vgpu_format(f) >>> 0,
       fence: () => _kw_vgpu_fence() >>> 0,
       fencesDone: () => _kw_vgpu_fences_done() >>> 0,
+      glErrors: () => _kw_vgpu_gl_errors() >>> 0,
       // A resource's GL texture (the WebGLTexture of the renderer's context,
       // null for a buffer), size, virgl format, whether row 0 is the top and
       // whether the format has alpha; null for no such resource.

@@ -1463,7 +1463,7 @@ export function start(): void {
 			? `last ${(ms / 1000).toFixed(0)} s: ${(d("presents") * 1000 / ms).toFixed(1)} presents/s, ${d("parks")} parks, ${(d("parks") ? d("parkedMs") / d("parks") : 0).toFixed(2)} ms parked each; `
 			: "";
 		return `virtio-gpu: ${rate}${g.presents} presents, ${g.commands} commands (${g.fenced} fenced: ${g.parks} parked, ${g.parkedMs.toFixed(0)} ms in all), ` +
-			`${g.reads} readbacks, ${g.errors} errors${g.contextLost ? " (the WebGL2 context is lost: restart the GL programs; the next one gets a new renderer)" : g.lastError ? ` (last: ${g.lastError})` : ""}`;
+			`${g.reads} readbacks, ${g.glErrors ? `${g.glErrors} WebGL errors (calls WebGL dropped; the browser console has them), ` : ""}${g.errors} errors${g.contextLost ? " (the WebGL2 context is lost: restart the GL programs; the next one gets a new renderer)" : g.lastError ? ` (last: ${g.lastError})` : ""}`;
 	}
 
 	/**

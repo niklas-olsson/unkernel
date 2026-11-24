@@ -172,6 +172,18 @@ In order, each with its reason in the commit message:
     surface 62592`, then every draw of the context; 2026-11-22, the full
     run by `unkernel-check.mjs --drm --cmd`, 0 errors since). The marker
     is UINTPTR_MAX, refused as a key.
+19. a host GL error drops a call, not the context: both builds set
+    `-Dcheck-gl-errors=false`, and without it vrend logs such an error as
+    an error (`GL error 0x502 in context N "name": the host dropped a call
+    (K so far)`; the first eight, then each time the count doubles; a
+    release build does not print warnings) and counts it
+    (`vrend_renderer_host_gl_errors()`, `kw_vgpu_gl_errors()`, the SDK's
+    `stats.glErrors`). WebGL refuses calls that GLES leaves undefined (a
+    texture both sampled and rendered into, a texture of another type than
+    its sampler, a vertex buffer too small for a draw), and with the checks
+    fatal one such call put the context in error for good (Firefox's window
+    went blank). `GL_OUT_OF_MEMORY` still puts the context in error, as do
+    vrend's own checks of the guest's commands.
 
 ## Single GL context
 
@@ -711,8 +723,8 @@ gives the DRM nodes udev's groups and modes (kernel/guest.md).
   ends by clearing pending GL errors (logged as `kw_virgl: blit of
   resource N: GL error ...`): with errors checked once per command buffer
   (patch 10) one left there, or by a transfer, which vrend does not check,
-  was charged to the next client's command buffer and put that context in
-  error.
+  was charged to the next client's command buffer (counted and logged as
+  that context's, patch 19).
 - **Snapshots**: refused while any 3D resource exists or a context has
   submitted commands (its objects, shaders, states, sub contexts, live
   only in the renderer), before the guest parks; the page says a program

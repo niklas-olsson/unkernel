@@ -461,6 +461,10 @@ function judgeDrm(res) {
 	const ms = res.steps.msaa;
 	if (ms) report("multisampling", ms.exitCode === 0 && /^ok samples/m.test(ms.stdout) && /^ok draw/m.test(ms.stdout) && /^kernel errors 0$/m.test(ms.stdout),
 		ms.stdout.trim().split("\n").join("; ") + (ms.stderr.trim() ? ` (stderr: ${ms.stderr.trim()})` : ""));
+	// A WebGL error drops one call and the guest's context goes on (gl.md, Patches, 19): none is expected.
+	// A lost context may raise one (CONTEXT_LOST_WEBGL), so not after --lose.
+	const glErrors = res.gl?.gpu?.glErrors;
+	if (glErrors !== undefined && !res.lose) report("WebGL errors", glErrors === 0, `${glErrors} calls dropped by WebGL (the [gl] virgl: GL error lines of the log)`);
 	const wi = res.windowImages;
 	if (wi) {
 		const named = Object.entries(wi.bufs).map(([n, b]) => `${n} res ${b.res}${b.texture ? ` (virgl format ${b.texture.format}, yTop ${b.texture.yTop}, alpha ${b.texture.alpha})` : ""}`);
