@@ -7,9 +7,9 @@ What unkernel's build outputs carry that is not unkernel's own, under which
 license, and the notices those licenses ask to travel with it. The outputs
 are the npm package [`unkernel`](https://www.npmjs.com/package/unkernel),
 the GitHub release's assets and the page. unkernel's own code is
-GPL-2.0-or-later ([LICENSE](LICENSE)), its SDK and page MIT
-([LICENSE-MIT](LICENSE-MIT)); the source of everything below, and how it is
-built, is at <https://github.com/pithings/unkernel>.
+GPL-2.0-or-later ([LICENSE](LICENSE)) and its SDK and page are MIT
+([LICENSE-MIT](LICENSE-MIT)). The page links downloaded components to their
+release and local components to this checkout's patch series and build files.
 
 ## The kernel bundle (`unkernel.wasm`)
 
@@ -132,9 +132,9 @@ files unkernel adds are listed, with their license, in
 
 ## The page
 
-The page's build serves this file at `/licenses.md`, followed by every
-package its JavaScript and CSS bundle, with the package's license text:
-among them [wland](https://github.com/pithings/wland) (MPL-2.0 AND MIT;
-source in that repository and its npm package),
+The page serves this file at `/licenses.md`, followed by the license text
+of each bundled JavaScript and CSS package. These include
+[wland](https://github.com/pithings/wland) (MPL-2.0 AND MIT),
 [wterm](https://wterm.dev/) (Apache-2.0), React (MIT) and the Geist fonts
-(SIL Open Font License 1.1).
+(SIL Open Font License 1.1). This checkout's [dependency patches](patches)
+contain its changes to wland's browser input adapter.

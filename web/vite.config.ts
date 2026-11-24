@@ -100,6 +100,8 @@ async function buildInfo(dev: boolean) {
 /** Where Vite lists the client's bundled packages (build.license), replaced by licenses.md. */
 const BUNDLED_LICENSES = ".vite/license.json";
 
+let checkout: Awaited<ReturnType<typeof buildInfo>>;
+
 /** A package in Vite's build.license list. */
 type BundledPackage = { name: string; version: string; identifier?: string; text?: string };
 
@@ -114,10 +116,18 @@ const CSS_PACKAGES = ["@fontsource-variable/geist", "@fontsource-variable/geist-
  * repository), then `bundled` and CSS_PACKAGES, each with its license text.
  */
 function licenses(bundled: BundledPackage[]): string {
-	const repo = "https://github.com/pithings/unkernel/blob/main/"; // src/config.ts REPO
+	const revision = checkout.repo ? `${checkout.repo}/blob/${checkout.commit || "HEAD"}/` : "";
+	const bundle = checkout.kernel === "local" ? revision :
+		`https://github.com/pithings/unkernel/blob/${encodeURIComponent(checkout.kernel)}/`;
 	const notice = readFileSync(path.join(import.meta.dirname, "../THIRD-PARTY.md"), "utf8")
 		.replace(/^<!--.*-->\n/gm, "")
-		.replace(/\]\((?![a-z]+:)([^)]+)\)/g, (_, p: string) => `](${repo}${p})`);
+		.replace(/\[([^\]\n]+)\]\((?![a-z]+:)([^)]+)\)/g, (_, label: string, file: string) => {
+			let root = revision;
+			if (/^(kernel\/|guest\/base\/|vk\/icd$)/.test(file)) root = bundle;
+			else if (file.startsWith("gl/") && !process.env.KW_GL) root = bundle;
+			else if (file.startsWith("vk/naga") && !process.env.KW_VK) root = bundle;
+			return root ? `[${label}](${root}${file})` : label;
+		});
 	if (!bundled.length) return notice; // the dev server
 	const all = new Map(bundled.map((p) => [p.name, p]));
 	for (const name of CSS_PACKAGES) {
@@ -205,7 +215,8 @@ export default defineConfig({
 			// build resolves them, and __KW_BUILD__ reads the base's banner.
 			name: "unkernel:kernel",
 			async config(_, { command }) {
-				return { define: { __KW_BUILD__: JSON.stringify(await buildInfo(command === "serve")) } };
+				checkout = await buildInfo(command === "serve");
+				return { define: { __KW_BUILD__: JSON.stringify(checkout) } };
 			},
 			configureServer(server) {
 				// /distros/<name>.erofs with Range support and as they are (erofs
@@ -340,7 +351,8 @@ export default defineConfig({
 					const list = bundle[BUNDLED_LICENSES];
 					if (list?.type !== "asset") throw new Error(`[licenses] Vite gave no ${BUNDLED_LICENSES}`);
 					delete bundle[BUNDLED_LICENSES];
-					this.emitFile({ type: "asset", fileName: "licenses.md", source: licenses(JSON.parse(String(list.source)) as BundledPackage[]) });
+					const notice = licenses(JSON.parse(String(list.source)) as BundledPackage[]);
+					this.emitFile({ type: "asset", fileName: "licenses.md", source: notice });
 				},
 			},
 		},
