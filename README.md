@@ -653,9 +653,17 @@ page's clock. A commit is observed after wland has handled it. Physical
 presentation and guest DOM events require their own measurements.
 
 The file includes the page revision, kernel and distro asset names,
-and a `profile` for the sampled interval. `topUserSites` ranks guest code by
-periodic user-time samples. `topInsnSites` ranks it by retired-instruction
-samples. File offsets identify code across address randomization. Check
+and a `profile` for the sampled interval. The trace and offline report
+identify the page's configured GL bundle with `build.glBundleSha256`, the
+SHA-256 of `virgl.mjs` followed by `virgl.wasm` (null when absent).
+`gl.state` and `gl.webgl` record the renderer state and host WebGL name at
+capture stop. The name may identify SwiftShader or a hardware backend, or
+be generic or null. Check inside the guest for an individual app's driver.
+Older captures omit these fields.
+
+`topUserSites` ranks guest code by periodic user-time samples.
+`topInsnSites` ranks it by retired-instruction samples.
+File offsets identify code across address randomization. Check
 dropped samples, missed ticks, and the duration of both profile requests
 before interpreting a short interval. The host timeline retains 2,048
 events and reports how many more it dropped. The SDK's full cumulative

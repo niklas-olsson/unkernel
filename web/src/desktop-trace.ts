@@ -7,6 +7,7 @@ import { summarizeProfile } from "./trace-summary.ts";
 
 type Build = typeof __KW_BUILD__ & {
 	bootAsset: string; kernelAsset: string; distro: string; distroAsset: string | null; imageId: string | null;
+	glBundleSha256: string | null;
 	worker: boolean; transport: KernelHandle["transport"]; jit: boolean; memoryMiB: number; userAgent: string;
 };
 type Args = Record<string, string | number | boolean>;
@@ -33,7 +34,7 @@ function checkLabel(label: string) {
 }
 
 /** Two cumulative guest profiles bracket a host timeline. Only explicit captures listen for input. */
-export function createDesktopTrace(vm: Pick<KernelHandle, "profile" | "exited">, build: Build, target: EventTarget) {
+export function createDesktopTrace(vm: Pick<KernelHandle, "profile" | "exited" | "gl">, build: Build, target: EventTarget, glRequested: boolean) {
 	let active: Capture | undefined;
 	let pending = false;
 	let ended = false;
@@ -85,6 +86,11 @@ export function createDesktopTrace(vm: Pick<KernelHandle, "profile" | "exited">,
 			pending = true;
 			c.listeners.abort();
 			try {
+				const status = vm.gl?.status;
+				const gl = {
+					state: status?.state ?? (glRequested ? "unavailable" : "off"),
+					webgl: status?.webgl ?? null,
+				};
 				const after = await snapshot();
 				const returned = now();
 				const profile = summarizeProfile(c.before, after);
@@ -95,7 +101,7 @@ export function createDesktopTrace(vm: Pick<KernelHandle, "profile" | "exited">,
 						span("profile", "end snapshot", end, returned),
 						span("profile", "summarize snapshots", returned, now()),
 					],
-					schemaVersion: 1, label: c.label, build,
+					schemaVersion: 1, label: c.label, build, gl,
 					pageTimeOriginMs: performance.timeOrigin, droppedEvents: c.dropped, profile,
 				};
 			} finally {

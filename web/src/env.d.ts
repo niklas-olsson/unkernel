@@ -27,6 +27,8 @@ declare module "virtual:unkernel-kernel" {
 	export const kernelUrl: URL;
 	export const kernelSmpUrl: URL | null;
 	export const glUrl: URL | null;
+	/** SHA-256 of the configured virgl.mjs and virgl.wasm bytes in that order. */
+	export const glBundleSha256: string | null;
 	export const vkShaderUrl: URL | null;
 	export const distros: { name: string; url: string; size: number; imageId?: string }[];
 }

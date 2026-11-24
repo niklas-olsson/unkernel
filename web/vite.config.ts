@@ -295,6 +295,7 @@ export default defineConfig({
 					`export const kernelUrl = ${up};`,
 					`export const kernelSmpUrl = ${smp};`,
 					`export const glUrl = ${gl};`,
+					`export const glBundleSha256 = ${JSON.stringify(s.gl?.sha256 ?? null)};`,
 					`export const vkShaderUrl = ${vk};`,
 					`export const distros = ${JSON.stringify(distros)};`,
 				].join("\n");

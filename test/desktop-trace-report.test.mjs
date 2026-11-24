@@ -71,6 +71,8 @@ test("reports sparse ranking coverage against the complete interval totals", t =
 	assert.equal(output.build.kernelAsset, trace.build.kernelAsset);
 	assert.equal(output.build.imageId, trace.build.imageId);
 	assert.equal(output.build.transport, trace.build.transport);
+	assert.equal(Object.hasOwn(output.build, "glBundleSha256"), false);
+	assert.equal(Object.hasOwn(output, "gl"), false);
 	assert.equal(output.hostEvents.input.keydown, 1);
 	assert.equal(output.hostEvents.waylandSurfaceCommits, 1);
 	assert.equal(output.hostEvents.retained, 2);
@@ -96,6 +98,26 @@ test("keeps absent input and each loss counter distinct, with null coverage for 
 	assert.equal(output.hostEvents.dropped, 5);
 	assert.equal(output.counters.missedTicks, 3);
 	assert.equal(output.counters.ringDroppedSamples, 7);
+});
+
+test("keeps packaged virgl and reported WebGL state independent", t => {
+	const digest = "b".repeat(64);
+	const rows = [
+		[null, "unavailable", null],
+		[digest, "off", null],
+		[digest, "idle", null],
+		[digest, "ready", null],
+		[digest, "ready", "ANGLE (Google, SwiftShader Device (Subzero), Vulkan)"],
+		[digest, "ready", "ANGLE (NVIDIA, GeForce RTX 4060, D3D11)"],
+	];
+	for (const [glBundleSha256, state, webgl] of rows) {
+		const trace = fixture();
+		trace.build.glBundleSha256 = glBundleSha256;
+		trace.gl = { state, webgl };
+		const output = report(t, trace);
+		assert.equal(output.build.glBundleSha256, glBundleSha256);
+		assert.deepEqual(output.gl, { state, webgl });
+	}
 });
 
 test("rejects unrelated JSON, unsupported versions, and malformed data", t => {

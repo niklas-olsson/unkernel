@@ -22,6 +22,7 @@
 // prefetch) runs only on Alpine. A machine the user has used is suspended by
 // itself when the tab stays hidden (?autosuspend=, phones by default) and
 // resumed when it is shown, and closing the page asks first (autosuspend.ts).
+import { glBundleSha256 } from "virtual:unkernel-kernel";
 import "@wterm/dom/src/terminal.css";
 import { WTerm } from "@wterm/dom";
 import { prefetchApkIndexes } from "./apk.ts";
@@ -1778,9 +1779,9 @@ export function start(): void {
 		KW.vm = vm;
 		const trace = cfg.trace ? (await import("./desktop-trace.ts")).createDesktopTrace(vm, {
 			...__KW_BUILD__, bootAsset: new URL(import.meta.url).pathname, kernelAsset: kernelUrl, distro: cfg.guest,
-			distroAsset: cfg.distro?.url ?? null, imageId: cfg.distro?.imageId ?? null,
+			distroAsset: cfg.distro?.url ?? null, imageId: cfg.distro?.imageId ?? null, glBundleSha256,
 			worker: cfg.worker, transport: vm.transport, jit: cfg.jit, memoryMiB: vm.memoryMiB, userAgent: navigator.userAgent,
-		}, window) : undefined;
+		}, window, glOwn ? cfg.gl : cfg.glParam) : undefined;
 		KW.trace = trace?.api;
 		// The guest preview (preview.ts) relays /vm/<id>/<port>/ to vm.fetch().
 		attachPreview(vm);

@@ -40,6 +40,18 @@ function boundedText(text, limit) {
 	return text !== null && text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
+function glObservation(value) {
+	if (value === undefined) return undefined;
+	const gl = object(value, "gl");
+	requireField(["off", "unavailable", "idle", "loading", "ready", "lost", "failed"].includes(gl.state), "gl.state");
+	return { state: gl.state, webgl: savedText(gl.webgl, "gl.webgl") };
+}
+
+function bundleDigest(value) {
+	requireField(value == null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)), "build.glBundleSha256");
+	return value;
+}
+
 function coverage(sites, metric, total, field) {
 	requireField(Array.isArray(sites) && sites.length <= 10, field);
 	let shown = 0;
@@ -105,7 +117,9 @@ function summarize(trace) {
 			linux: savedText(build.linux, "build.linux"),
 			imageId: savedText(build.imageId, "build.imageId"),
 			transport: savedText(build.transport, "build.transport"),
+			glBundleSha256: bundleDigest(build.glBundleSha256),
 		},
+		gl: glObservation(trace.gl),
 		scope: "Whole guest across the snapshot interval. File-backed sites combine processes.",
 		cpus,
 		durationMs: count(profile.durationMs, "profile.durationMs"),
