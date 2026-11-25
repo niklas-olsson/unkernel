@@ -47,9 +47,10 @@ The API differs from 0.13-0.15. Examples of all of these are in
   allocator to each call.
 - build.zig uses `root_module = b.createModule(...)`,
   `b.addLibrary(.{ .linkage })` and `b.addTranslateC`.
-- kwemu is built for wasm64 with cpu `mvp`, so the object needs only
-  memory64: no atomics, bulk memory or sign-ext (`-Dkwemu-atomics` adds
-  atomics and bulk memory for an SMP kernel).
+- kwemu is built for wasm64 with cpu `mvp` plus bulk memory, sign-ext,
+  nontrapping-fptoint and mutable globals, which the kernel's C objects
+  (clang's `generic` cpu) need anyway; no atomics (`-Dkwemu-atomics` adds
+  them for an SMP kernel).
 - The guest programs (kwtest, kwbench, glimmer, kwtty, kw9p, kwvsock,
   kwshm) are built with `zig cc` (`aarch64-linux-musl`, `-mcpu=generic`,
   static); abitest freestanding (`aarch64-linux-none`, `-nostdlib`).
@@ -81,6 +82,10 @@ minirootfs, Debian, busybox-static, erofs-utils, lz4, zstd) in
 `guest/**/pins.sh` (erofs-utils is patched: `guest/tools/erofs-utils-patches/`,
 data in tar order and the metadata zone in front, for the distro images'
 layout; guest/README.md) (`ALPINE_TARBALL=file` overrides the download);
-the Vulkan headers guest Vulkan's ICD builds against in `vk/pins.sh`. wterm (`@wterm/dom`
+the Vulkan headers guest Vulkan's ICD builds against in `vk/pins.sh`, and
+so are shaderc 2026.4 and its glslang, SPIRV-Tools and SPIRV-Headers
+commits, from which `vk/glslc.sh` builds a host glslc (and installs the
+SPIR-V headers) into `vendor/toolchain/glslc` for
+`test/vk/guest/build-llama.sh` (`GLSLC=` names another). wterm (`@wterm/dom`
 0.5.10, Apache-2.0) is an npm dependency of `web/`, pinned exactly and
 locked in `pnpm-lock.yaml` (see web.md).

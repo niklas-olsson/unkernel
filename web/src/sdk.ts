@@ -15,6 +15,7 @@ import { glUrl, kernelSmpUrl, kernelUrl, vkShaderUrl } from "virtual:unkernel-ke
 export * from "../../js/core/index.ts";
 export { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB } from "../../js/web/memory.ts";
 export { DATA_DISK_NAME, importDataDisk, openDataDisk, openDistroDisk, resetDataDisk } from "../../js/web/disk.ts";
+export { createAudioOut } from "../../js/web/audio.ts";
 export { webCpuBlocker } from "../../js/web/cpu.ts";
 export { serveWasiPrograms } from "../../js/web/wasi.ts";
 

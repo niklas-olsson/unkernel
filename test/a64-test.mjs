@@ -91,7 +91,7 @@ let jit32Module = null, jit32Note = "";
   else {
     const dir = await mkdtemp(join(tmpdir(), "kwemu-a64-jit32-"));
     const out = join(dir, "kwemu-harness-jit32.wasm");
-    const p = spawnSync(wasmOpt, ["-g", "--enable-memory64", "--enable-bulk-memory", "--enable-threads", "--memory64-lowering", "--table64-lowering", jitPath, "-o", out], { encoding: "utf8" });
+    const p = spawnSync(wasmOpt, ["-g", "--enable-memory64", "--enable-bulk-memory", "--enable-sign-ext", "--enable-nontrapping-float-to-int", "--enable-mutable-globals", "--enable-threads", "--memory64-lowering", "--table64-lowering", jitPath, "-o", out], { encoding: "utf8" });
     if (p.status !== 0) jit32Note = `FAIL a64 wasm-opt lowering: ${p.stderr}`;
     else jit32Module = await WebAssembly.compile(await readFile(out));
     await rm(dir, { recursive: true, force: true });

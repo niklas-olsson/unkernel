@@ -20,7 +20,7 @@
 // reports an underrun to the program and the sink plays silence), so the
 // sink gets real samples only, in playback order, at the guest's clock.
 // A sink that plays on another clock (an audio device) must absorb the
-// drift between the two (e.g. web/src/audio.ts adjusts its resampling
+// drift between the two (e.g. js/web/audio.ts adjusts its resampling
 // ratio to keep its queue level). No import suspends.
 
 const ENODEV = 19;

@@ -51,8 +51,9 @@
 //                                      allocated until then.
 //   ?sound=0                           no sound card. By default the guest gets ALSA hw:0,0 and
 //                                      /dev/dsp (kwsnd, playback), played with Web Audio
-//                                      (audio.ts; try `glimmer`). Nothing runs until a program
-//                                      plays; the first tap or key press after that unmutes.
+//                                      (js/web/audio.ts; try `glimmer`). Nothing runs until a
+//                                      program plays; what ended before the first tap or key
+//                                      press (the last 10 s) plays then.
 //   ?distro=<name> | ?distro=none     the distro image to boot (default debian, else the first;
 //                                      an unknown name boots the default and says so; none: no
 //                                      image, the base shell). Its changes to the root

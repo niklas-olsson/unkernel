@@ -51,7 +51,7 @@
   "scripts": {
     "build": "obuild",
     "typecheck": "tsc -p .",
-    "test": "pnpm typecheck && pnpm test:block && pnpm test:net && pnpm test:tty && pnpm test:http && pnpm test:ws && pnpm test:9p && pnpm test:distro && pnpm test:gl-gpu && pnpm test:vk",
+    "test": "pnpm typecheck && pnpm test:block && pnpm test:net && pnpm test:tty && pnpm test:http && pnpm test:ws && pnpm test:9p && pnpm test:distro && pnpm test:gl-gpu && pnpm test:vk && pnpm test:audio",
     "test:block": "node --test test/block.test.ts",
     "test:net": "node --test test/net.test.ts",
     "test:tty": "node --test test/tty.test.ts",
@@ -65,6 +65,7 @@
     "test:distro": "node --test test/distro.test.ts",
     "test:gl-gpu": "node --test test/gl-gpu.test.ts",
     "test:vk": "node --test test/vk.test.ts",
+    "test:audio": "node --test test/audio.test.ts",
     "unkernel": "node js/cli.ts",
     "dev": "pnpm -C web dev",
     "build:web": "pnpm -C web build",

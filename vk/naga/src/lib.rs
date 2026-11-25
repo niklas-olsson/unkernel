@@ -17,13 +17,22 @@
 // blocks given per-member locations, std140 scalar/vec2 arrays wrapped,
 // uniform blocks WGSL cannot lay out repacked into u32 words (uniform.rs).
 // On naga's IR: gl_PointSize dropped, input blocks split, push constants
-// become a uniform buffer, only the requested entry point kept. On the
-// WGSL text: struct padding for Vulkan offsets, and fragment shaders turn
-// off derivative_uniformity. flipY is spv-in's adjust_coordinate_space.
+// become a uniform buffer, only the requested entry point kept, uniform
+// compute builtins passed to helpers as arguments (builtins.rs), loop
+// continues that would make a barrier non-uniform restructured (flow.rs).
+// Compute modules with subgroup builtins but no subgroup operation get the
+// builtins as arithmetic on the local index for opts subgroupSize
+// (subgroup.rs, a SPIR-V pass).
+// On the WGSL text: struct padding for Vulkan offsets, and fragment shaders
+// turn off derivative_uniformity. flipY is spv-in's adjust_coordinate_space.
 
+mod builtins;
+mod flow;
 mod small;
 mod spirv;
+mod subgroup;
 mod uniform;
+mod virt;
 
 use naga::{AddressSpace, ImageClass, ImageDimension, ScalarKind, StorageAccess, TypeInner};
 use std::fmt::Write as _;
@@ -75,13 +84,14 @@ struct Opts {
 	storage_formats: Vec<(u32, u32, u32)>,
 	features: Vec<String>,
 	limits: Option<[u32; 4]>,
+	subgroup_size: Option<u32>,
 }
 
 impl Opts {
 	fn parse(s: &str) -> Opts {
 		NO_VALIDATE.store(false, std::sync::atomic::Ordering::Relaxed);
 		STD_LAYOUT.store(false, std::sync::atomic::Ordering::Relaxed);
-		let mut o = Opts { stage: naga::ShaderStage::Vertex, entry: "main".into(), flip_y: false, push_group: 0, spec: Vec::new(), arrays: Vec::new(), dump: false, link: Vec::new(), storage_formats: Vec::new(), features: Vec::new(), limits: None };
+		let mut o = Opts { stage: naga::ShaderStage::Vertex, entry: "main".into(), flip_y: false, push_group: 0, spec: Vec::new(), arrays: Vec::new(), dump: false, link: Vec::new(), storage_formats: Vec::new(), features: Vec::new(), limits: None, subgroup_size: None };
 		for line in s.lines() {
 			let Some((k, v)) = line.split_once('=') else { continue };
 			match k {
@@ -101,6 +111,7 @@ impl Opts {
 						o.limits = Some([n[0], n[1], n[2], n[3]]);
 					}
 				}
+				"subgroupSize" => o.subgroup_size = v.parse().ok().filter(|&n: &u32| n > 0),
 				"features" => o.features = v.split(',').filter(|x| !x.is_empty()).map(String::from).collect(),
 				"noValidate" => NO_VALIDATE.store(v == "1", std::sync::atomic::Ordering::Relaxed),
 				"pushGroup" => o.push_group = v.parse().unwrap_or(0),
@@ -204,6 +215,12 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 	let words = spirv::fold_spec_ops(words);
 	let words = spirv::misc_fixes(words);
 	let words = spirv::strip_memory_operands(words);
+	// Subgroup builtins without subgroup operations: arithmetic on the local
+	// index for the subgroup size the ICD reports (subgroup.rs).
+	let words = match (o.stage, o.subgroup_size) {
+		(naga::ShaderStage::Compute, Some(n)) => subgroup::lower_subgroup_builtins(words, n),
+		_ => words,
+	};
 	let words = spirv::lower_umul_extended(words);
 	let words = spirv::localize_subgroup_operands(words);
 	let words = small::lower_small_storage(words, o.features.iter().any(|f| f == "shader-f16"))?;
@@ -284,7 +301,37 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 		}
 	}
 
-	let info = validate(&module)?;
+	// Uniform builtins read through spv-in's private copies in helpers
+	// (builtins.rs): passed down as arguments, kept only when the result
+	// still validates.
+	if o.stage == naga::ShaderStage::Compute {
+		let saved = module.clone();
+		if builtins::uniform_builtins(&mut module) && validate(&module).is_err() {
+			module = saved;
+		}
+	}
+	// Barriers after a loop's non-uniform continue (flow.rs): exact
+	// rewrites, kept only when the result still validates.
+	let saved = module.clone();
+	if flow::uniform_loop_continues(&mut module) && validate(&module).is_err() {
+		module = saved;
+	}
+	let mut info = validate(&module)?;
+	// A workgroup over the device's limits that shares memory or has
+	// barriers: K virtual invocations per invocation (virt.rs), kept only
+	// when the result validates (else fit_workgroup refuses it below).
+	let mut virt_refused = None;
+	if let (naga::ShaderStage::Compute, Some(l)) = (o.stage, o.limits) {
+		let saved = module.clone();
+		match virt::virtualize(&mut module, &info, &virt::Limits { max: l }).and_then(|done| if done { validate(&module).map(Some) } else { Ok(None) }) {
+			Ok(Some(i)) => info = i,
+			Ok(None) => module = saved,
+			Err(e) => {
+				virt_refused = Some(e);
+				module = saved;
+			}
+		}
+	}
 	let mut pc = naga::back::PipelineConstants::default();
 	for (k, v) in &o.spec {
 		// Ids the shader does not declare are ignored, as in Vulkan.
@@ -319,12 +366,15 @@ fn translate(spv: &[u8], o: &Opts) -> Result<String, String> {
 	if o.stage == naga::ShaderStage::Fragment {
 		wgsl.insert_str(0, "diagnostic(off, derivative_uniformity);\n");
 	}
-	if !wgsl.contains("enable subgroups;") && (wgsl.contains("@builtin(subgroup_") || wgsl.contains(" subgroup") || wgsl.contains("(subgroup") || wgsl.contains("quadSwap") || wgsl.contains("quadBroadcast")) {
+	if !wgsl.contains("enable subgroups;") && uses_subgroups(&wgsl) {
 		// naga's writer uses subgroup builtins without enabling them.
 		wgsl.insert_str(0, "enable subgroups;\n");
 	}
 	let dispatch_scale = match (o.stage, o.limits) {
-		(naga::ShaderStage::Compute, Some(l)) => fit_workgroup(&mut wgsl, l)?,
+		(naga::ShaderStage::Compute, Some(l)) => fit_workgroup(&mut wgsl, l).map_err(|e| match &virt_refused {
+			Some(v) => format!("{}; virtual invocations: {}", e, v),
+			None => e,
+		})?,
 		_ => None,
 	};
 	let attr = match o.stage {
@@ -890,10 +940,13 @@ fn fit_workgroup(wgsl: &mut String, l: [u32; 4]) -> Result<Option<[u32; 3]>, Str
 		"workgroup size {}x{}x{} exceeds the device's limits (maxComputeWorkgroupSize {}x{}x{}, maxComputeInvocationsPerWorkgroup {})",
 		size[0], size[1], size[2], l[0], l[1], l[2], l[3]
 	);
-	for t in ["var<workgroup>", "Barrier(", "workgroupUniformLoad", "subgroup"] {
+	for t in ["var<workgroup>", "Barrier(", "workgroupUniformLoad"] {
 		if wgsl.contains(t) {
 			return Err(format!("{} and the shader uses {} (cannot split its workgroups)", what, t.trim_end_matches('(')));
 		}
+	}
+	if uses_subgroups(wgsl) {
+		return Err(format!("{} and the shader uses subgroups (cannot split its workgroups)", what));
 	}
 	let mut k = [1u32; 3];
 	for a in 0..3 {
@@ -913,6 +966,23 @@ fn fit_workgroup(wgsl: &mut String, l: [u32; 4]) -> Result<Option<[u32; 3]>, Str
 	wgsl.replace_range(start..end, &new);
 	derive_workgroup_builtins(wgsl, end, [size[0], size[1], size[2]], k)?;
 	Ok(Some(k))
+}
+
+// Whether WGSL uses subgroups: a subgroup or quad builtin function
+// (subgroupAdd, subgroupBallot, quadSwapX, ...) or builtin value, not an
+// identifier that merely contains the word (a variable named `subgroup`).
+fn uses_subgroups(wgsl: &str) -> bool {
+	if wgsl.contains("@builtin(subgroup_") || wgsl.contains("@builtin(num_subgroups)") {
+		return true;
+	}
+	let b = wgsl.as_bytes();
+	["subgroup", "quad"].iter().any(|w| {
+		wgsl.match_indices(w).any(|(i, _)| {
+			let before = i.checked_sub(1).map(|j| b[j]);
+			let after = b.get(i + w.len());
+			!before.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') && after.is_some_and(|c| c.is_ascii_uppercase())
+		})
+	})
 }
 
 // After a split, the entry point's local_invocation_id/index, workgroup_id
@@ -1076,6 +1146,79 @@ mod tests {
 		match super::translate(&spv, &super::Opts::parse(&opts)) {
 			Ok(s) => println!("{}", &s[..s.len().min(200)]),
 			Err(e) => println!("error: {}", e),
+		}
+	}
+
+	// flow.rs: the continue after a barrier goes (test/shaders/barriercont.comp,
+	// run and compared by run.ts); the shapes it must leave alone keep theirs.
+	#[test]
+	fn barrier_continues() {
+		let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/test/shaders/");
+		let tr = |f: &str, opts: &str| super::translate(&std::fs::read(format!("{}{}", dir, f)).unwrap(), &super::Opts::parse(opts)).unwrap();
+		for f in ["barriercont.comp.spv", "barriercont.comp.opt.spv"] {
+			assert!(!tr(f, "stage=compute\npushGroup=1").contains("continue;"), "{}", f);
+		}
+		for f in ["barrierneg.comp.spv", "barrierneg.comp.opt.spv"] {
+			assert!(tr(f, "stage=compute\npushGroup=1\nspec.0=0").contains("continue;"), "{}", f);
+		}
+	}
+
+	// builtins.rs: a helper reading workgroup_id and num_workgroups through
+	// private copies takes them as arguments (test/shaders/builtinloop.comp,
+	// run and compared by run.ts); local_invocation_id is left alone.
+	#[test]
+	fn uniform_builtins() {
+		let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/test/shaders/");
+		let tr = |f: &str| super::translate(&std::fs::read(format!("{}{}", dir, f)).unwrap(), &super::Opts::parse("stage=compute\npushGroup=1")).unwrap();
+		let w = tr("builtinloop.comp.spv");
+		assert!(w.contains("gl_WorkGroupID_arg: vec3<u32>") && w.contains("gl_NumWorkGroups_arg: vec3<u32>"));
+		let w = tr("builtinneg.comp.spv");
+		assert!(w.contains("gl_NumWorkGroups_arg") && !w.contains("gl_LocalInvocationID_arg"));
+	}
+
+	// virt.rs: 512- and 1024-wide workgroups with shared memory and barriers
+	// on a 256-invocation device keep their workgroup count, 256 wide
+	// (test/shaders/virt.comp, run and compared by run.ts); a barrier in
+	// another function or in a loop on the invocation, or a split by more
+	// than 8, stays refused.
+	#[test]
+	fn virtual_invocations() {
+		let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/test/shaders/");
+		let tr = |f: &str, spec: &str| super::translate(&std::fs::read(format!("{}{}", dir, f)).unwrap(), &super::Opts::parse(&format!("stage=compute\npushGroup=1\nlimits=256,256,64,256\n{}", spec)));
+		for f in ["virt.comp.spv", "virt.comp.opt.spv"] {
+			for bs in [512, 1024] {
+				let r = tr(f, &format!("spec.0={}", bs)).unwrap();
+				assert!(r.contains("@workgroup_size(256, 1, 1)") && !r.contains("dispatchScale"), "{} {}", f, bs);
+			}
+		}
+		let e = tr("virtneg.comp.spv", "spec.0=0").unwrap_err();
+		assert!(e.contains("virtual invocations: a barrier in a function other than the entry point"), "{}", e);
+		for f in ["virtneg.comp.spv", "virtneg.comp.opt.spv"] {
+			let e = tr(f, "spec.0=1").unwrap_err();
+			assert!(e.contains("may differ between invocations"), "{}: {}", f, e);
+		}
+		let e = tr("specwg.comp.spv", "spec.0=4096\nspec.1=8").unwrap_err();
+		assert!(e.contains("virtual invocations: no power of two"), "{}", e);
+	}
+
+	// subgroup.rs: with subgroupSize the builtins become arithmetic on the
+	// local index (test/shaders/subgroup.v13.comp, run and compared by
+	// run.ts), also under virtual invocations; without it, or next to a
+	// subgroup operation (subgroupneg.v13.comp), WebGPU's subgroups stay.
+	#[test]
+	fn subgroup_builtins() {
+		let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/test/shaders/");
+		let tr = |f: &str, opts: &str| super::translate(&std::fs::read(format!("{}{}", dir, f)).unwrap(), &super::Opts::parse(&format!("stage=compute\npushGroup=1\n{}", opts))).unwrap();
+		for f in ["subgroup.v13.comp.spv", "subgroup.v13.comp.opt.spv"] {
+			for opts in ["spec.0=64\nsubgroupSize=32", "spec.0=48\nsubgroupSize=32", "spec.0=512\nsubgroupSize=32\nlimits=256,256,64,256"] {
+				let r = tr(f, opts);
+				assert!(!r.contains("subgroup") && r.contains("@builtin(local_invocation_index)") && r.contains("\"requires\":[]"), "{} {}", f, opts);
+			}
+			assert!(tr(f, "spec.0=512\nsubgroupSize=32\nlimits=256,256,64,256").contains("@workgroup_size(256, 1, 1)"));
+			assert!(tr(f, "spec.0=64").contains("\"requires\":[\"subgroups\"]"), "{}", f);
+		}
+		for f in ["subgroupneg.v13.comp.spv", "subgroupneg.v13.comp.opt.spv"] {
+			assert!(tr(f, "subgroupSize=32").contains("\"requires\":[\"subgroups\"]"), "{}", f);
 		}
 	}
 }

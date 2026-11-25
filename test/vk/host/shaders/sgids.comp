@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// Subgroup builtins without subgroup operations: the host translates them
+// for the subgroup size agreed in the hello (vk/naga/src/subgroup.rs), so
+// each invocation sees subgroups of exactly that size in local index order.
+#extension GL_KHR_shader_subgroup_basic : enable
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer B { uint v[]; } b;
+void main() {
+	b.v[gl_GlobalInvocationID.x] = gl_SubgroupSize * 1000000u + gl_NumSubgroups * 10000u + gl_SubgroupID * 100u + gl_SubgroupInvocationID;
+}

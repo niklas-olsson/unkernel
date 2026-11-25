@@ -58,15 +58,18 @@ processes requests strictly in order.
 
 ## Hello
 
-`{"op":"hello","r":1,"version":1}` ->
+`{"op":"hello","r":1,"version":1,"subgroupSize":N}` ->
 ```
 {"r":1,"version":1,
  "adapter":{"vendor":"","architecture":"","device":"","description":""},
  "limits":{ every GPUSupportedLimits member of the device },
  "features":[ GPUFeatureName of the device ],
  "formats":{ "<VkFormat number>": caps, ... },
+ "subgroupSize":S,
  "external":{"token":T}}   (only where the host offers external present: Amendments, "External present")
 ```
+`subgroupSize`: the subgroup size the ICD reports, which the host
+translates compute shaders for (Amendments, "Subgroup size").
 caps bits: 1 sampled, 2 linear filter, 4 colour attachment, 8 blend, 16
 depth/stencil attachment, 32 storage image, 64 vertex attribute format.
 Only formats the host can map are listed; the ICD derives
@@ -175,6 +178,7 @@ export interface VkShaderOpts {
   features?: string[];  // the device's WebGPU features; "shader-f16" keeps float16_t native (Amendments)
   limits?: { maxComputeWorkgroupSizeX: number; maxComputeWorkgroupSizeY: number;
              maxComputeWorkgroupSizeZ: number; maxComputeInvocationsPerWorkgroup: number };  // compute (Amendments)
+  subgroupSize?: number;  // compute: the reported subgroup size (Amendments, "Subgroup size")
 }
 export interface VkShaderResult {
   wgsl: string;
@@ -394,7 +398,14 @@ sides can (Amendments, "External present").
     query, flags}` / `vkCmdEndQuery {queryPool, query}` (occlusion: inside
     a render pass, one pool per render pass, as WebGPU wants),
     `vkCmdWriteTimestamp {pipelineStage, queryPool, query}` (outside render
-    passes; inside one it reads 0), `vkCmdCopyQueryPoolResults {queryPool,
+    passes; inside one it reads 0. WebGPU has timestamps only at pass
+    boundaries: each is a pass of its own, written at its start, after
+    the work before it, with a no-op dispatch so that it is not empty; a
+    difference of two is the time between those points, waits for the
+    guest's next submit included. Queries are resolved when they are read,
+    one resolve for a read, as WebGPU converts to nanoseconds at the
+    resolve and a backend's conversion may change between resolves),
+    `vkCmdCopyQueryPoolResults {queryPool,
     firstQuery, queryCount, dstBuffer, dstOffset, stride, flags}` (64-bit
     and 32-bit, WITH_AVAILABILITY; WAIT is implied by queue order;
     occlusion values there are WebGPU's raw non-zero counts, which
@@ -402,7 +413,9 @@ sides can (Amendments, "External present").
     `vkResetQueryPool {queryPool, firstQuery, queryCount}` (1.2 host query
     reset) and `{"op":"getQueryPoolResults","r":N,"queryPool","firstQuery",
     "queryCount"}` -> `{"r":N,"available":[0|1,...]}` + binary: queryCount
-    little-endian u64 values (occlusion normalized to 0/1), answered once
+    little-endian u64 values (occlusion normalized to 0/1; a timestamp
+    that reads earlier than the one written before it, as WebGPU allows,
+    is raised to that one, so differences are never negative), answered once
     the work submitted before it is done (vkGetQueryPoolResults: format per
     its flags guest-side; with WAIT send it after the fence/submit, values
     of queries not yet ended read 0 with available 0).
@@ -524,6 +537,13 @@ sides can (Amendments, "External present").
   WGSL's uniformity rule accepts barriers after workgroup-uniform early
   exits): their `bindings` list only the resources the entry point uses.
   Graphics stages still list unused declared bindings.
+- Translator (2026-11-24): in a loop that may execute a barrier,
+  `if (c) { ...; continue; } REST` becomes `if (c) { ...; continue; }
+  else { REST }` and continues in tail position of the body (plain
+  fall-throughs) are dropped (vk/naga/src/flow.rs), so a barrier after
+  an invocation-dependent continue (llama.cpp's
+  mul_mat_vec_q2_k/q3_k/q6_k) is uniform for WGSL. Exact rewrites only;
+  other non-uniform barriers are still refused by WebGPU.
 - Host (2026-11-24, round 5): varying interpolation follows Vulkan, where
   the FRAGMENT inputs' decorations decide (vkd3d and glslang put Flat only
   on the fragment input). The host no longer passes the fragment stage
@@ -548,7 +568,8 @@ sides can (Amendments, "External present").
   with VK_KHR_16bit_storage and VK_KHR_8bit_storage, as the translator
   emulates them as u32 words; the uniform/push-constant 8/16-bit variants,
   shaderInt8/Int16, timeline semaphores, buffer device address and
-  descriptor indexing false; subgroups reported as size 1, basic only); the 1.2 entry
+  descriptor indexing false; subgroups basic only, no stage, of the hello's
+  size: Amendments, "Subgroup size"); the 1.2 entry
   points exist (timeline/BDA ones are inert, the draw-indirect-count ones
   are dropped and logged). Two memory heaps: device-only memory's is
   4 GiB (`KWVK_HEAP_MB` sets it, as `KWVK_DEVICE_NAME` sets the device name, which is "kwvk (WebGPU: ADAPTER)" otherwise, with "apple", "metal", "cuda", "rocm" and "hip" spelled apart ("a.p.p.l.e"), as Ollama takes a device so named for a Metal, CUDA or ROCm one (driverInfo has the adapter as it is); WebGPU tells no size, and that memory has
@@ -806,3 +827,73 @@ sides can (Amendments, "External present").
   ggml-vulkan does, would keep the guest's CPU from the host in inline
   mode). ggml-vulkan's waited uploads of each token's inputs went from 7
   round trips a token (Qwen2.5 0.5B) to none.
+
+- Read-only buffers kept (2026-11-24, host; amends "Host (ICD agent,
+  round 4)"): a compute pipeline is made with its read-only storage
+  buffers promoted to read_write as before; when WebGPU refuses that (Tint
+  takes reads of read_write storage as non-uniform: ggml's matmul_id
+  returns early on a read-only buffer's value before its barriers), it is
+  made again, in an error scope of its own, with the shader's read-only
+  buffers kept ("read-only-storage" layout entries), and the reply waits
+  for that. At a dispatch of such a pipeline, a kept read-only binding
+  whose buffer the dispatch also binds writable, at any range (one usage
+  scope), is read from a scratch copy made just before it, as for
+  overlapping ranges. Pipelines WebGPU takes promoted are unchanged.
+- Translator (2026-11-24): a compute helper that reads num_workgroups or
+  workgroup_id through spv-in's private copy (SPIR-V that spirv-opt did not
+  inline: llama.cpp's bf16 and rope rms_norm) gets the builtin as an
+  argument instead, when the copy is provably the builtin (stored once
+  from it at the entry point's start and never otherwise written), so
+  WGSL takes loops on them as uniform. The value of OpAtomicIAdd and the
+  other single-value atomics is copied into the atomic's block first
+  (naga's spv-in left a loop header's value out of scope after the loop).
+- Virtual invocations (2026-11-24, translator; amends "Translator +
+  host: compute workgroups larger than the device allows"): a workgroup
+  over the device's limits that has workgroup variables or barriers keeps
+  its workgroup count and memory and is made X / K wide, K a power of two
+  up to 8, each invocation running K virtual invocations
+  (vk/naga/src/virt.rs): local_invocation_id/index and
+  global_invocation_id are those of the original workgroup, the code
+  between barriers runs once per virtual invocation, barriers and the
+  control flow around them once per invocation. No `dispatchScale`. The
+  translation fails as before, with "; virtual invocations: REASON"
+  appended, when the pass refuses: a barrier in a function other than the
+  entry point, subgroup operations or workgroupUniformLoad, a condition
+  around a barrier (or a break or continue past one) that its
+  conservative uniformity check cannot show to be the same for every
+  invocation, no power of two up to 8 that fits, constructs it does not
+  know.
+- Subgroup size (2026-11-24, ICD, host, translator; amends "ICD
+  (2026-11-24, round 4)", which reported size 1). The ICD offers no
+  subgroup operation (supportedStages 0, operations BASIC; Vulkan 1.1
+  wants COMPUTE among the stages, a known deviation), but apps size
+  workgroups by subgroupSize (llama.cpp's mat-vec, soft_max, argmax,
+  sum_rows: one invocation per workgroup at 1) and some shaders read the
+  subgroup builtins without operations (llama.cpp's gated_delta_net
+  shmem variant: shared memory indexed by gl_SubgroupInvocationID in a
+  workgroup of subgroupSize invocations). The size is agreed per
+  connection in the hello:
+  - The ICD sends `"subgroupSize":N`: N = `KWVK_SUBGROUP_SIZE` (a power of
+    two up to 128), else 0, the host's choice. It reports the reply's
+    `subgroupSize` (in VkPhysicalDeviceSubgroupProperties and
+    VkPhysicalDeviceVulkan11Properties), or 1 when the reply has none (an
+    older host, which translates as before; a `KWVK_SUBGROUP_SIZE` it
+    cannot take is reported on stderr).
+  - The host answers N when it is a power of two up to 128, else its own
+    (`VK_SUBGROUP_SIZE`, 32: ggml's largest multiple of it, 4x, stays
+    within the 256 invocations every WebGPU device allows), and 1 to a
+    hello without the field (older ICDs report 1). It translates every
+    compute stage of the connection with `opts.subgroupSize` = that size.
+  - Translator (vk/naga/src/subgroup.rs): a compute module that reads
+    SubgroupSize, SubgroupLocalInvocationId, SubgroupId or NumSubgroups
+    and has no subgroup or group operation, no subgroup-scoped barrier,
+    none of their capabilities and no mask builtins gets them as
+    `subgroupSize`, local_invocation_index % `subgroupSize`,
+    local_invocation_index / `subgroupSize` and ceil(local size /
+    `subgroupSize`): subgroups of exactly that size filled in local index
+    order (a last one may be partial), which nothing else in such a module
+    can tell from real ones. No `enable subgroups` then. It runs before the
+    other passes, so a split workgroup and virtual invocations see the
+    original local index. Other modules keep WebGPU's subgroups (requires
+    "subgroups", their width the adapter's), as before; graphics stages
+    are not lowered.

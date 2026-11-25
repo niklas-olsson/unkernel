@@ -102,6 +102,7 @@ struct kw_physical_device {
 	char adapter[128]; /* the WebGPU adapter, for driverInfo */
 	uint64_t max_buffer; /* WebGPU's maxBufferSize */
 	uint32_t ext_token; /* the hello's external.token: the host resolves external buffers (0: it does not) */
+	uint32_t subgroup_size; /* the hello's subgroupSize (1 without it) */
 };
 struct kw_instance {
 	VK_LOADER_DATA loader;

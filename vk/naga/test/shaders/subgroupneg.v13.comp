@@ -1,0 +1,17 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// A subgroup operation next to the builtins (llama.cpp's cumsum,
+// rms_norm_partials): subgroup.rs leaves the module alone, so it keeps
+// WebGPU's subgroups (`enable subgroups`, requires "subgroups") whatever
+// opts subgroupSize says.
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer O { float o[]; };
+
+void main() {
+	const float s = subgroupAdd(o[gl_GlobalInvocationID.x]);
+	if (gl_SubgroupInvocationID == 0u)
+		o[gl_WorkGroupID.x * 64u + gl_SubgroupID] = s;
+}

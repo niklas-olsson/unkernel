@@ -5,7 +5,7 @@
 // the page's WebGPU device, with a fake translator (hand-written WGSL) and,
 // when the server provides it, the real one (vk-shader.ts) on SPIR-V.
 
-import { VkRenderer, frame, vkDeviceDescriptor } from "/js/core/vk-host.ts";
+import { VK_SUBGROUP_SIZE, VkRenderer, frame, vkDeviceDescriptor } from "/js/core/vk-host.ts";
 
 const logs = [];
 const log = (line) => {
@@ -748,6 +748,39 @@ async function suite(device, adapter, translator, label, shaderBytes) {
 		check(`${label} dead aliased writable binding left out`, dv[0] === 9, `${dv[0]}`);
 	}
 
+	// (v) refused with its read-only buffers made read_write (an early return on
+	// one's value before a barrier): made with them kept read-only, and right
+	// with all three bindings in one buffer (the read-only ones copied aside)
+	if (label === "spirv") {
+		const em = nid(), edsl = nid(), epl = nid(), ep = nid(), eset = nid(), eb = nid();
+		cl.post({ op: "vkCreateShaderModule", id: em }, shaderBytes("earlyro.comp"));
+		cl.post({ op: "vkCreateDescriptorSetLayout", id: edsl, bindings: [0, 1, 2].map((b) => ({ binding: b, descriptorType: 7, descriptorCount: 1, stageFlags: 0x20 })) });
+		cl.post({ op: "vkCreatePipelineLayout", id: epl, setLayouts: [edsl] });
+		const made = await cl.req({ op: "vkCreateComputePipelines", id: ep, layout: epl, stage: { stage: 0x20, module: em, name: "main" } }).then(() => "made", (e) => e.message);
+		check(`${label} read-only buffers kept where read_write is refused: pipeline made`, made === "made", made);
+		// c.n = 2 at 0, a.v (3 groups of 64) at 256, d.v at 1024; group 2 returns early
+		const init = new Uint32Array(512);
+		init[0] = 2;
+		for (let i = 0; i < 192; i++) init[64 + i] = 1000 + i;
+		init.fill(7, 256);
+		cl.post({ op: "vkCreateBuffer", id: eb, size: 2048, usage: 0x20 });
+		cl.post({ op: "writeBuffer", buffer: eb, offset: 0 }, new Uint8Array(init.buffer));
+		cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: eset, layout: edsl }] });
+		cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [[0, 0, 4], [1, 256, 768], [2, 1024, 1024]].map(([b, offset, range]) => ({ dstSet: eset, dstBinding: b, descriptorType: 7, bufferInfo: [{ buffer: eb, offset, range }] })) });
+		cl.post({ op: "vkQueueSubmit", cmds: [
+			{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: ep },
+			{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 1, layout: epl, firstSet: 0, descriptorSets: [eset] },
+			{ c: "vkCmdDispatch", groupCountX: 3, groupCountY: 1, groupCountZ: 1 },
+		] });
+		const ev = new Uint32Array((await cl.req({ op: "readBuffer", buffer: eb, offset: 1024, size: 1024 })).bin.buffer.slice(0, 1024));
+		const bad = [];
+		for (let g = 0; g < 192; g++) {
+			const want = g < 128 ? 1000 + (g & ~63) + 63 - (g & 63) + 1 : 7;
+			if (ev[g] !== want && bad.length < 4) bad.push(`d[${g}]=${ev[g]} (want ${want})`);
+		}
+		check(`${label} read-only buffers kept, bound with a writable range of the same buffer`, made === "made" && !bad.length && !cl.lost, bad.join(", ") || cl.lost);
+	}
+
 	// (n) occlusion queries: query 0 around the triangle, query 1 around nothing
 	{
 		const qp = nid(), qb = nid();
@@ -964,10 +997,64 @@ async function loud(renderer, label, shaderBytes) {
 		cl.conn.close();
 	}
 	// 512 invocations sharing memory on a 256-invocation device: no split possible
-	if (renderer.device.limits.maxComputeInvocationsPerWorkgroup < 512) {
+	// 512 invocations sharing memory on a 256-invocation device: the fake
+	// translator refuses it; the real one runs 2 virtual invocations each
+	if (renderer.device.limits.maxComputeInvocationsPerWorkgroup < 512 && label === "fake") {
 		const { cl, err } = await computePipe("shared512.comp");
 		check(`${label} pipeline refused: 512-wide workgroup with shared memory`, err && /workgroup size 512/.test(err.message), err?.message ?? "created");
 		cl.conn.close();
+	}
+	if (renderer.device.limits.maxComputeInvocationsPerWorkgroup < 512 && label === "spirv") {
+		const { cl, err } = await computePipe("shared512.comp");
+		let sum = "no pipeline";
+		if (!err) {
+			cl.post({ op: "vkCreateBuffer", id: 10, size: 2048, usage: 0x20 });
+			cl.post({ op: "writeBuffer", buffer: 10, offset: 0 }, new Uint8Array(new Float32Array(512).map((_, i) => i).buffer));
+			cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 11, layout: 2 }] });
+			cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 11, dstBinding: 0, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 0, range: 2048 }] }] });
+			cl.post({ op: "vkQueueSubmit", cmds: [
+				{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: 4 },
+				{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 1, layout: 3, firstSet: 0, descriptorSets: [11] },
+				{ c: "vkCmdDispatch", groupCountX: 1, groupCountY: 1, groupCountZ: 1 },
+			] });
+			sum = new Float32Array((await cl.req({ op: "readBuffer", buffer: 10, offset: 0, size: 4 })).bin.buffer.slice(0, 4))[0];
+		}
+		check(`${label} 512-wide workgroup with shared memory: made (virtual invocations), sum right`, !err && sum === 130816, err?.message ?? `sum ${sum}`);
+		cl.conn.close();
+		const neg = await computePipe("shared512fn.comp");
+		check(`${label} pipeline refused: 512-wide workgroup, barrier in another function`, neg.err && /workgroup size 512.*virtual invocations: a barrier in a function/.test(neg.err.message), neg.err?.message ?? "created");
+		neg.cl.conn.close();
+	}
+	// the subgroup size (hello): an ICD that asks nothing (older ones) reports
+	// 1, 0 takes the host's, a power of two its own; compute stages get the
+	// subgroup builtins as subgroups of exactly that size in local index order
+	if (label === "spirv") {
+		for (const [ask, want] of [[undefined, 1], [0, VK_SUBGROUP_SIZE], [8, 8], [3, VK_SUBGROUP_SIZE]]) {
+			const cl = new Client(renderer);
+			cl.chunky = false;
+			const h = (await cl.req({ op: "hello", version: 1, ...(ask === undefined ? {} : { subgroupSize: ask }) })).json;
+			cl.post({ op: "vkCreateShaderModule", id: 1 }, shaderBytes("sgids.comp"));
+			cl.post({ op: "vkCreateDescriptorSetLayout", id: 2, bindings: [{ binding: 0, descriptorType: 7, descriptorCount: 1, stageFlags: 0x20 }] });
+			cl.post({ op: "vkCreatePipelineLayout", id: 3, setLayouts: [2], pushConstantRanges: [] });
+			const err = await cl.req({ op: "vkCreateComputePipelines", id: 4, layout: 3, stage: { stage: 0x20, module: 1, pName: "main" } }).then(() => undefined, (e) => e);
+			let bad = err ? err.message : "";
+			if (!err) {
+				cl.post({ op: "vkCreateBuffer", id: 10, size: 512, usage: 0x20 });
+				cl.post({ op: "vkAllocateDescriptorSets", sets: [{ id: 11, layout: 2 }] });
+				cl.post({ op: "vkUpdateDescriptorSets", descriptorWrites: [{ dstSet: 11, dstBinding: 0, descriptorType: 7, bufferInfo: [{ buffer: 10, offset: 0, range: 512 }] }] });
+				cl.post({ op: "vkQueueSubmit", cmds: [
+					{ c: "vkCmdBindPipeline", pipelineBindPoint: 1, pipeline: 4 },
+					{ c: "vkCmdBindDescriptorSets", pipelineBindPoint: 1, layout: 3, firstSet: 0, descriptorSets: [11] },
+					{ c: "vkCmdDispatch", groupCountX: 2, groupCountY: 1, groupCountZ: 1 },
+				] });
+				const v = new Uint32Array((await cl.req({ op: "readBuffer", buffer: 10, offset: 0, size: 512 })).bin.buffer.slice(0, 512));
+				const exp = (i) => want * 1000000 + Math.ceil(64 / want) * 10000 + Math.floor((i % 64) / want) * 100 + ((i % 64) % want);
+				const i = v.findIndex((x, k) => x !== exp(k));
+				if (i >= 0) bad = `v[${i}] ${v[i]} != ${exp(i)}`;
+			}
+			check(`${label} subgroup size asked ${ask}: hello says ${want}, the builtins follow it`, h.subgroupSize === want && !bad, `hello ${h.subgroupSize}; ${bad}`);
+			cl.conn.close();
+		}
 	}
 	if (label !== "fake") return;
 	// a graphics pipeline with an adjacency topology: refused with VK_ERROR_FEATURE_NOT_PRESENT (-8)
@@ -1225,6 +1312,99 @@ async function externalPresent(device, adapter) {
 	co.conn.close();
 }
 
+/**
+ * Timestamp queries as ggml-vulkan's GGML_VK_PERF_LOGGER uses them: a host
+ * reset, timestamps spread over several submits, one vkGetQueryPoolResults.
+ * WebGPU resolves timestamps to nanoseconds when they are resolved, and a
+ * backend's conversion may change between resolves (Dawn on Metal refines
+ * its tick period as it runs): emulated here by each resolve adding a
+ * smaller offset. Also a sample the backend did not write (it reads 0), and
+ * whether a timestamp sits in an empty pass (stage-boundary backends may not
+ * sample those).
+ */
+async function timestamps(device, adapter) {
+	if (!device.features.has("timestamp-query")) return log("skip timestamps (the device has no timestamp-query)");
+	const renderer = new VkRenderer({ device, adapter, shaders: fakeTranslator, log: (l) => log(`[ts] ${l}`) });
+	const cl = new Client(renderer);
+	await cl.req({ op: "hello", version: 1 });
+	const E = GPUCommandEncoder.prototype, D = GPUDevice.prototype, P = GPUComputePassEncoder.prototype;
+	const orig = { resolve: E.resolveQuerySet, begin: E.beginComputePass, createBuffer: D.createBuffer, dispatch: P.dispatchWorkgroups, end: P.end };
+	const shift = device.createComputePipeline({
+		layout: "auto",
+		compute: {
+			entryPoint: "main",
+			module: device.createShaderModule({ code: `
+@group(0) @binding(0) var<storage, read_write> v: array<u32>;
+@group(0) @binding(1) var<uniform> p: vec4u;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {
+	if (id.x < p.y) { let i = p.x / 4u + id.x * 2u + 1u; v[i] = v[i] + p.z; }
+}` }),
+		},
+	});
+	let resolves = 0, drop = -1, tsPasses = 0, emptyTs = 0;
+	const passes = new WeakMap();
+	D.createBuffer = function (desc) {
+		// resolve targets also writable by the shift above
+		return orig.createBuffer.call(this, desc.usage & 512 ? { ...desc, usage: desc.usage | 128 | 8 } : desc);
+	};
+	E.resolveQuerySet = function (set, first, n, dst, off) {
+		orig.resolve.call(this, set, first, n, dst, off);
+		const u = orig.createBuffer.call(device, { size: 16, usage: 64 | 8 });
+		device.queue.writeBuffer(u, 0, new Uint32Array([off, n, 100 - ++resolves, 0]));
+		const pass = orig.begin.call(this, {});
+		pass.setPipeline(shift);
+		pass.setBindGroup(0, device.createBindGroup({ layout: shift.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: dst } }, { binding: 1, resource: { buffer: u } }] }));
+		orig.dispatch.call(pass, Math.ceil(n / 64));
+		orig.end.call(pass);
+		if (drop >= first && drop < first + n) this.clearBuffer(dst, off + (drop - first) * 8, 8);
+	};
+	E.beginComputePass = function (desc) {
+		const pass = orig.begin.call(this, desc);
+		if (desc?.timestampWrites) {
+			passes.set(pass, 0);
+			tsPasses++;
+		}
+		return pass;
+	};
+	P.dispatchWorkgroups = function (...a) {
+		if (passes.has(this)) passes.set(this, passes.get(this) + 1);
+		return orig.dispatch.apply(this, a);
+	};
+	P.end = function () {
+		if (passes.get(this) === 0) emptyTs++;
+		return orig.end.call(this);
+	};
+	try {
+		const qp = 1, fb = 2;
+		const ts = (q) => ({ c: "vkCmdWriteTimestamp", pipelineStage: 1, queryPool: qp, query: q });
+		const fill = { c: "vkCmdFillBuffer", dstBuffer: fb, dstOffset: 0, size: 4096, data: 7 };
+		const values = (r) => [...new BigUint64Array(r.bin.buffer.slice(r.bin.byteOffset, r.bin.byteOffset + r.bin.length))];
+		cl.post({ op: "vkCreateQueryPool", id: qp, queryType: 2, queryCount: 8 });
+		cl.post({ op: "vkCreateBuffer", id: fb, size: 4096, usage: 0x2 });
+		// three submits, as ggml splits a graph, then one read
+		cl.post({ op: "vkResetQueryPool", queryPool: qp, firstQuery: 0, queryCount: 8 });
+		cl.post({ op: "vkQueueSubmit", cmds: [ts(0), fill, ts(1)] });
+		cl.post({ op: "vkQueueSubmit", cmds: [fill, ts(2), fill, ts(3)] });
+		cl.post({ op: "vkQueueSubmit", cmds: [ts(4)] });
+		const r = await cl.req({ op: "getQueryPoolResults", queryPool: qp, firstQuery: 0, queryCount: 5 });
+		const v = values(r);
+		const d = v.slice(1).map((x, i) => x - v[i]);
+		check("timestamps over three submits: monotonic, in nanoseconds", r.json.available.join() === "1,1,1,1,1" && v[0] > 0n && d.every((x) => x >= 0n && x < 1_000_000_000n), `deltas ${d.join(" ")} ns, available ${r.json.available}`);
+		check("timestamps not in empty passes", tsPasses >= 5 && emptyTs === 0, `${emptyTs} of ${tsPasses} timestamp passes empty`);
+		// a sample the backend did not write reads 0: never earlier than the one before it
+		drop = 1;
+		cl.post({ op: "vkResetQueryPool", queryPool: qp, firstQuery: 0, queryCount: 8 });
+		cl.post({ op: "vkQueueSubmit", cmds: [ts(0), fill, ts(1), fill, ts(2)] });
+		const v2 = values(await cl.req({ op: "getQueryPoolResults", queryPool: qp, firstQuery: 0, queryCount: 3 }));
+		check("timestamps: an unwritten sample repeats the previous one", v2[0] > 0n && v2[1] === v2[0] && v2[2] >= v2[1], `${v2.join(" ")}`);
+	} finally {
+		Object.assign(E, { resolveQuerySet: orig.resolve, beginComputePass: orig.begin });
+		Object.assign(P, { dispatchWorkgroups: orig.dispatch, end: orig.end });
+		D.createBuffer = orig.createBuffer;
+		cl.conn.close();
+	}
+}
+
 async function deviceLoss() {
 	const adapter = await navigator.gpu.requestAdapter();
 	const device = await adapter.requestDevice(vkDeviceDescriptor(adapter));
@@ -1267,6 +1447,7 @@ async function main() {
 			await suite(device, adapter, tr, "spirv", (name) => spv[name]);
 		} else log("skip spirv suite (no translator or glslangValidator)");
 		await robustness(device, adapter);
+		await timestamps(device, adapter);
 		await externalPresent(device, adapter);
 		await deviceLoss();
 	} catch (e) {

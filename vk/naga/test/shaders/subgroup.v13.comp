@@ -1,0 +1,45 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// llama.cpp's gated_delta_net (shmem variant) shape: subgroup builtins and
+// no subgroup operation. Each invocation reads gl_SubgroupSize,
+// gl_SubgroupInvocationID (also through a helper, as spv-in's private
+// copy), gl_SubgroupID and gl_NumSubgroups, and groups of LANES
+// invocations reduce through shared memory indexed by the subgroup lane
+// with barriers between the steps. With opts subgroupSize S the
+// translator makes the builtins arithmetic on the local index
+// (subgroup.rs); run.ts dispatches it for several WG and S (a partial last
+// subgroup, a 512-wide workgroup that runs as virtual invocations) and
+// compares every output with what subgroups of exactly S invocations in
+// local index order give.
+#extension GL_KHR_shader_subgroup_basic : enable
+layout(constant_id = 0) const uint WG = 64;
+layout(constant_id = 1) const uint LANES = 8;
+layout(local_size_x_id = 0) in;
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 2) writeonly buffer I { uint info[]; };
+shared float temp[WG];
+
+uint sglane() {
+	return gl_SubgroupInvocationID;
+}
+
+void main() {
+	const uint base = gl_WorkGroupID.x * WG;
+	const uint li = gl_SubgroupID * gl_SubgroupSize + sglane();
+	temp[li] = a[base + li] * float(gl_SubgroupInvocationID + 1u);
+	barrier();
+	for (uint s = LANES / 2u; s > 0u; s >>= 1u) {
+		const float other = temp[li ^ s];
+		barrier();
+		temp[li] += other;
+		barrier();
+	}
+	const uint g = gl_GlobalInvocationID.x;
+	o[g] = temp[li];
+	info[4u * g] = gl_SubgroupSize;
+	info[4u * g + 1u] = gl_SubgroupInvocationID;
+	info[4u * g + 2u] = gl_SubgroupID;
+	info[4u * g + 3u] = gl_NumSubgroups;
+}

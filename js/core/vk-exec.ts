@@ -156,8 +156,6 @@ class Exec {
 	bound: Bound = { groups: [], vbs: [] };
 	index = 0;
 	cmds: any[];
-	/** query pool -> indices written in this submit (resolved at the end) */
-	touched = new Map<any, Set<number>>();
 	stateVer = 0;
 	drawMemo?: { key: string; v: any; refined: any; p: any };
 	/** textures to destroy once the submit is done */
@@ -418,10 +416,10 @@ class Exec {
 		p.avail[q] = 1;
 	}
 
+	/** A query the query set holds a value of (resolved when it is read: resolveQueries); seq is the order of writes. */
 	touch(p: any, q: number): void {
-		let t = this.touched.get(p);
-		if (!t) this.touched.set(p, (t = new Set()));
-		t.add(q);
+		p.written[q] = 1;
+		p.seq[q] = ++p.clock;
 		p.avail[q] = 1;
 	}
 
@@ -430,25 +428,6 @@ class Exec {
 		const q = k.query | 0;
 		if (q < 0 || q >= p.count) throw new Error(`query ${k.query} out of range`);
 		return { p, q };
-	}
-
-	/** Resolve the queries this submit wrote into their pools' result buffers. */
-	finishQueries(): void {
-		for (const [p, set] of this.touched) {
-			if (!p.set) continue;
-			const idx = [...set].sort((a, b) => a - b);
-			const scratch = this.dev.createBuffer({ size: p.count * 8, usage: BU.QUERY_RESOLVE | BU.COPY_SRC, label: "kwvk query resolve" });
-			this.scratch.push(scratch);
-			for (let i = 0; i < idx.length; ) {
-				let j = i;
-				while (j + 1 < idx.length && idx[j + 1] === idx[j]! + 1) j++;
-				const first = idx[i]!;
-				const n = idx[j]! - first + 1;
-				this.enc.resolveQuerySet(p.set, first, n, scratch, 0);
-				this.enc.copyBufferToBuffer(scratch, 0, p.results, first * 8, n * 8);
-				i = j + 1;
-			}
-		}
 	}
 
 	/** A list index buffer for a fan of n vertices (relative indices; the draw's base vertex is the fan's first). */
@@ -552,7 +531,9 @@ class Exec {
 	 * writable) in one dispatch; Vulkan allows it (ggml-vulkan's in-place
 	 * ops bind src and dst to one range). A binding that is read-only in the
 	 * app's shader and overlaps another binding of the same buffer is read
-	 * from a scratch copy made just before the dispatch.
+	 * from a scratch copy made just before the dispatch. So is a binding a
+	 * pipeline keeps "read-only-storage" (vk-host.ts readOnlyRetry) whose
+	 * buffer the dispatch also binds writable anywhere (one usage scope).
 	 */
 	aliasFix(layout: any, st: { sets: any[]; dyn: number[][] }): Map<number, Map<number, any>> | undefined {
 		const ents: any[] = [];
@@ -560,21 +541,28 @@ class Exec {
 			const set = st.sets[s];
 			if (!set) return;
 			for (const e of slot.entries) {
-				if (!e.buffer || e.buffer.type === "uniform" || e.buffer.hasDynamicOffset) continue;
+				if (!e.buffer || e.buffer.type === "uniform") continue;
 				const [vkb, el] = slot.src.get(e.binding) || [e.binding >> 1, 0];
 				const d = set.desc.get(dkey(vkb, el));
 				if (!d) continue;
 				const b = this.c.objs.get(d.buffer);
 				if (!b?.buf) continue;
+				// dynamic offsets: only as the writable buffer a kept read-only binding meets
+				if (e.buffer.hasDynamicOffset) {
+					if (e.buffer.type === "storage") ents.push({ s, binding: e.binding, dyn: true, w: true, buf: b.buf });
+					continue;
+				}
 				const size = Math.min(((isWhole(d.range) ? b.size - d.offset : d.range) + 3) & ~3, b.buf.size - d.offset);
-				ents.push({ s, binding: e.binding, ro: !!e.kwRO, buf: b.buf, off: d.offset, size });
+				ents.push({ s, binding: e.binding, ro: !!e.kwRO, kept: e.buffer.type === "read-only-storage", w: e.buffer.type === "storage", buf: b.buf, off: d.offset, size });
 			}
 		});
 		let over: Map<number, Map<number, any>> | undefined;
 		let n = 0;
 		for (const a of ents) {
-			if (!a.ro) continue;
-			const clash = ents.some((x) => x !== a && x.buf === a.buf && x.off < a.off + a.size && a.off < x.off + x.size);
+			if (!a.ro && !a.kept) continue;
+			const clash = a.kept
+				? ents.some((x) => x.w && x.buf === a.buf)
+				: ents.some((x) => x !== a && !x.dyn && x.buf === a.buf && x.off < a.off + a.size && a.off < x.off + x.size);
 			if (!clash) continue;
 			if (this.passKind === "compute") this.endPass();
 			let sc = this.aliasScratch[n];
@@ -974,6 +962,7 @@ class Exec {
 				if (first >= 0 && n > 0) {
 					this.enc.clearBuffer(p.results, first * 8, n * 8);
 					p.avail.fill(0, first, first + n);
+					p.written.fill(0, first, first + n);
 				}
 				break;
 			}
@@ -1010,7 +999,12 @@ class Exec {
 					break;
 				}
 				if (this.passKind === "compute") this.endPass();
-				this.enc.beginComputePass({ timestampWrites: { querySet: p.set, beginningOfPassWriteIndex: q } }).end();
+				// a pass of its own, written at its start (after the work before it), with one
+				// no-op dispatch: backends that sample at stage boundaries may not sample an empty pass
+				const tp = this.enc.beginComputePass({ label: "kwvk timestamp", timestampWrites: { querySet: p.set, beginningOfPassWriteIndex: q } });
+				tp.setPipeline(nopPipeline(this.c));
+				tp.dispatchWorkgroups(1);
+				tp.end();
 				this.touch(p, q);
 				break;
 			}
@@ -1025,9 +1019,7 @@ class Exec {
 				const w = wide ? 8 : 4;
 				const stride = k.stride || w * (avail ? 2 : 1);
 				if (stride & 3 || (k.dstOffset || 0) & 3) throw new Error("unaligned query copy");
-				// the queries this submit wrote are resolved at its end: resolve now for copies in the same submit
-				this.finishQueries();
-				this.touched.clear();
+				resolveQueries(this.dev, this.enc, p, first, n, this.scratch);
 				const one = this.up.alloc(new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0]), 4);
 				for (let i = 0; i < n; i++) {
 					const at = (k.dstOffset || 0) + i * stride;
@@ -1219,7 +1211,6 @@ export function runSubmit(c: Conn, cmds: any[]): Promise<void> {
 	} catch (e) {
 		throw abandon("the end of the command list", e);
 	}
-	ex.finishQueries();
 	ex.up.buf.unmap();
 	c.dev.queue.submit([ex.enc.finish()]);
 	ex.up.buf.destroy();
@@ -1229,7 +1220,52 @@ export function runSubmit(c: Conn, cmds: any[]): Promise<void> {
 	return done;
 }
 
+/**
+ * Resolve the queries of pool p in [first, first + n) that the query set
+ * holds values of into p.results, with one resolveQuerySet. Queries are
+ * resolved when they are read (getQueryPoolResults, vkCmdCopyQueryPoolResults),
+ * not by the submits that wrote them: WebGPU converts timestamps to
+ * nanoseconds at the resolve, and a backend's conversion may change between
+ * resolves (Dawn on Metal refines its tick period while it runs), so the
+ * timestamps of one read, whichever submits wrote them, take one conversion.
+ * The resolve buffer goes to `scratch` (destroyed by the caller).
+ */
+export function resolveQueries(dev: any, enc: any, p: any, first: number, n: number, scratch: any[]): void {
+	if (!p.set || first < 0) return;
+	let lo = -1, hi = -1;
+	for (let i = first; i < first + n; i++) {
+		if (!p.written[i]) continue;
+		if (lo < 0) lo = i;
+		hi = i;
+	}
+	if (lo < 0) return;
+	const buf = dev.createBuffer({ size: (hi - lo + 1) * 8, usage: BU.QUERY_RESOLVE | BU.COPY_SRC, label: "kwvk query resolve" });
+	scratch.push(buf);
+	enc.resolveQuerySet(p.set, lo, hi - lo + 1, buf, 0);
+	// only the written runs: the others between them may hold values from before a reset
+	for (let i = lo; i <= hi; ) {
+		if (!p.written[i]) {
+			i++;
+			continue;
+		}
+		let j = i;
+		while (j + 1 <= hi && p.written[j + 1]) j++;
+		enc.copyBufferToBuffer(buf, (i - lo) * 8, p.results, i * 8, (j - i + 1) * 8);
+		i = j + 1;
+	}
+}
+
 // --- helper pipelines --------------------------------------------------------
+
+/** A compute pipeline that does nothing (the dispatch that keeps a timestamp's pass from being empty). */
+function nopPipeline(c: Conn): any {
+	let h = c.r.helpers.get("nop");
+	if (h) return h;
+	const module = c.dev.createShaderModule({ code: "@compute @workgroup_size(1) fn main() {}" });
+	h = c.dev.createComputePipeline({ layout: c.dev.createPipelineLayout({ bindGroupLayouts: [] }), compute: { module, entryPoint: "main" } });
+	c.r.helpers.set("nop", h);
+	return h;
+}
 
 function byteCopyPipeline(c: Conn): any {
 	let h = c.r.helpers.get("bytecopy");

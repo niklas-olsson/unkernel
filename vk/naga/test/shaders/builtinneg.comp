@@ -1,0 +1,24 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// What builtins.rs must leave alone (run.ts): the same helper loop on
+// gl_LocalInvocationID, which differs between the invocations of a
+// workgroup, so WebGPU must still refuse the barrier inside it.
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint n; } p;
+layout(std430, binding = 0) buffer D { float d[]; };
+shared float sh[64];
+
+void work() {
+	const uint tid = gl_LocalInvocationID.x;
+	for (uint i = gl_LocalInvocationID.x; i < p.n; i += gl_NumWorkGroups.x) {
+		barrier();
+		sh[tid] = d[i];
+		barrier();
+		d[i] = sh[63u - tid];
+	}
+}
+
+void main() {
+	work();
+}

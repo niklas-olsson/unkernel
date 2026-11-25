@@ -20,6 +20,8 @@ export interface VkShaderOpts {
 	features?: string[];
 	/** Compute: the device's workgroup limits; a larger workgroup that only uses global_invocation_id is shrunk (result.dispatchScale). */
 	limits?: { maxComputeWorkgroupSizeX: number; maxComputeWorkgroupSizeY: number; maxComputeWorkgroupSizeZ: number; maxComputeInvocationsPerWorkgroup: number };
+	/** Compute: the subgroup size the ICD reports. A module that reads the subgroup builtins but uses no subgroup operation gets them as arithmetic on the local invocation index for this size (no `subgroups` feature); others keep WebGPU's subgroups. */
+	subgroupSize?: number;
 }
 
 export interface VkShaderVarying {
@@ -112,6 +114,7 @@ export async function loadVkShader(wasm: BufferSource | Response | Promise<Respo
 			const l = opts.limits;
 			if (l) text += `limits=${l.maxComputeWorkgroupSizeX},${l.maxComputeWorkgroupSizeY},${l.maxComputeWorkgroupSizeZ},${l.maxComputeInvocationsPerWorkgroup}\n`;
 			if (opts.features?.length) text += `features=${opts.features.join(",")}\n`;
+			if (opts.subgroupSize) text += `subgroupSize=${opts.subgroupSize}\n`;
 			for (const v of opts.link ?? []) text += `link.${v.location}=${v.interpolation},${v.sampling}\n`;
 			const o = enc.encode(text);
 			const sp = e.kwvk_alloc(spirv.length);

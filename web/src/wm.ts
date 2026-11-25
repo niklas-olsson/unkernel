@@ -52,8 +52,10 @@
 // workspace's size, and compact: phones and narrow viewports, where every
 // window is drawn maximized without chrome, only the top one shows, and the
 // Dock is the switcher. Geometry is kept in compact mode and used again when
-// the viewport widens. Callbacks run synchronously from the store's listener
-// after each change, so an app sees focus and visibility changes at once.
+// the viewport widens. While a maximized window is shown (dockHides()) the
+// Dock hides itself and the workspace takes its strip too. Callbacks run
+// synchronously from the store's listener after each change, so an app sees
+// focus and visibility changes at once.
 //
 // Snapping (the snap section below; the geometry is wmsnap.ts's): a window's
 // x, y, w, h are always its own geometry; maximized, or snapped to a tile
@@ -169,6 +171,9 @@ function topId(s: WmState): string | null {
 	}
 	return null;
 }
+
+/** The Dock hides itself (components/Dock.tsx) and the workspace has its strip: a maximized window is shown. Not in compact mode, where the Dock is the switcher. */
+export const dockHides = (s: WmState = $.get()): boolean => !s.compact && s.windows.some((w) => w.maximized && !w.minimized);
 
 /** The geometry it is drawn at: maximized (or compact) fills the workspace, snapped its tile (snapGeom). */
 export function drawnGeom(w: WmWindow, s: WmState = $.get()): Geom {
@@ -319,14 +324,24 @@ function update(id: string, patch: WindowPatch): void {
 let areaEl: HTMLElement | null = null;
 let areaRo: ResizeObserver | null = null;
 
-/** Set the workspace's size (components/Workspace.tsx): windows are placed in it, and clamped into it when it shrinks (maximized ones when restored). */
+/** dockHides() when the workspace was last measured. */
+let hadDock = true;
+/**
+ * Set the workspace's size (components/Workspace.tsx): windows are placed in
+ * it, and clamped into it when it shrinks (maximized ones when restored); when
+ * only the Dock came back, no further than to keep their title bars in it, so
+ * maximizing a window and restoring it leaves the others where they were.
+ */
 function setArea(w: number, h: number): void {
 	const s = $.get();
 	w = Math.floor(w); h = Math.floor(h);
 	if (s.area.w === w && s.area.h === h) return;
 	const shrank = w < s.area.w || h < s.area.h;
 	const area = { w, h };
-	commit({ ...s, area, windows: shrank ? s.windows.map((o) => (o.placed && !o.maximized ? { ...o, ...fit(o, o, area) } : o)) : s.windows });
+	const dock = !dockHides(s), dockOnly = dock && !hadDock && w === s.area.w;
+	hadDock = dock;
+	const refit = (o: WmWindow): Partial<Geom> => (dockOnly ? { y: clamp(o.y, 0, h - TITLE), h: Math.min(o.h, h) } : fit(o, o, area));
+	commit({ ...s, area, windows: shrank ? s.windows.map((o) => (o.placed && !o.maximized ? { ...o, ...refit(o) } : o)) : s.windows });
 }
 /** Compact mode (phones, narrow viewports): every window maximized without chrome, one shown. */
 function setCompact(compact: boolean): void {

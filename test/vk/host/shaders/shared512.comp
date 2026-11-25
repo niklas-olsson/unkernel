@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 #version 450
 // 512 invocations reducing through shared memory (ggml's norm family): on a
-// device allowing 256 the workgroup cannot be split, so no pipeline.
+// device allowing 256 the translator runs each invocation as 2 virtual ones
+// (vk/naga/src/virt.rs), so the pipeline is made and the sum is right.
 layout(local_size_x = 512) in;
 layout(set = 0, binding = 0) buffer B { float v[]; } b;
 shared float s[512];

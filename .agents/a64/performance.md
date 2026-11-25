@@ -421,9 +421,6 @@ Node, Bun and Claude Code (Where the time goes), in this order:
    save only kwemu's own gathering and emitting.
 4. **A cheaper decoder**, only if decode stays above about 8% of npm's
    time (about 300 host instructions per decoded guest instruction).
-5. **Binaryen `-O2` after the 32-bit lowering**: 2-3.5% fewer main-thread
-   host instructions on claude and npm (2026-11-20, perf); wall time not
-   yet measured on a quiet machine.
 
 Smaller: tier op kinds for LDAR/STLR and LSE (generic ops are 0.1-1.6% of
 these programs' instructions). Not worth revisiting: the compile

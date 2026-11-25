@@ -27,12 +27,18 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   submitted work may write (copy regions, storage buffers the bound
   pipeline's SPIR-V may write, as bound) are read back at fence waits. Its physical device is an
   integrated GPU whose limits, features and formats come from the host's
-  hello reply (WebGPU's). WSI: VK_KHR_wayland_surface (external buffers
+  hello reply (WebGPU's), as does its subgroup size (32; no subgroup
+  operation, supportedStages 0, which Vulkan 1.1 does not allow: it wants
+  COMPUTE there). WSI: VK_KHR_wayland_surface (external buffers
   on the page's wland, else wl_shm buffers; pre-multiplied alpha;
   Presentation below), VK_KHR_xcb_surface and VK_KHR_xlib_surface
   (XPutImage), VK_EXT_headless_surface; Wayland, xcb and Xlib are
   `dlopen`ed. `KWVK_LINK` picks the link (`vsock:2:1018` default, `tcp:`,
-  `unix:`); `KWVK_DEBUG`, `KWVK_TRACE`, `KWVK_STATS`,
+  `unix:`); `KWVK_SUBGROUP_SIZE=N` (a power of two up to 128) asks the
+  host for another subgroup size than its 32, which the ICD reports
+  (`KWVK_SUBGROUP_SIZE=1`: the size before 2026-11-24; an older host
+  takes none and the ICD reports 1; vk/PROTOCOL.md, Amendments, "Subgroup
+  size"); `KWVK_DEBUG`, `KWVK_TRACE`, `KWVK_STATS`,
   `KWVK_FENCE_SYNC=1` (every fence waits for its submit's reply) and
   `KWVK_SPIRV_DIR=DIR` (keeps every module) are for debugging. Errors and
   wrong-result warnings go to stderr whatever `KWVK_DEBUG` says, each
@@ -75,7 +81,17 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   NonWritable (or NonReadable), as older glslang marks `readonly buffer`,
   is read-only (write-only) as a whole: naga reads only the variable's
   decorations, and WebGPU refuses a read_write buffer bound over the range
-  of another binding. Uniform blocks WGSL cannot lay out (std430 push
+  of another binding. Compute helpers that read num_workgroups or
+  workgroup_id through spv-in's private copies get them as arguments
+  (`src/builtins.rs`), and a workgroup over the device's limits that
+  shares memory or has barriers runs each invocation as 2 to 8 virtual
+  ones (`src/virt.rs`; vk/PROTOCOL.md, Amendments, "Virtual
+  invocations"). Compute modules that read the subgroup builtins without
+  any subgroup operation (llama.cpp's gated_delta_net and ssm_scan) get
+  them as arithmetic on the local index for the reported subgroup size,
+  so they need no `subgroups` feature and see that size whatever the
+  adapter's (`src/subgroup.rs`; vk/PROTOCOL.md, Amendments, "Subgroup
+  size"). Uniform blocks WGSL cannot lay out (std430 push
   constants with arrays of stride 4, as llama.cpp's rope, which Firefox
   and Safari refused) are repacked into `array<vec4<u32>, N>` words
   (`src/uniform.rs`; vk/PROTOCOL.md, Amendments), and naga validates
@@ -103,13 +119,21 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   the translator on `test/vk/guest/double.comp` (skipped without
   `kwvk-naga.wasm`).
 - `node test/vk/host/check.mjs`: the host renderer alone in headless Chrome
-  with a fake client (109 cases, the failures that must reach the guest
-  included: refused and unusable pipelines, lost devices; descriptor copies
+  with a fake client (119 cases, the failures that must reach the guest
+  included: refused and unusable pipelines, lost devices; a pipeline made
+  with its read-only buffers kept and dispatched with them in a buffer it
+  also writes; a 512-wide shared-memory reduction on 256 invocations;
+  the hello's subgroup size and subgroup builtins that follow it;
+  timestamps over
+  several submits under a conversion that changes per resolve, and a
+  sample that reads 0, never going backwards; descriptor copies
   past a binding's end; external present:
   tokens, export ids, pictures premultiplied and opaque, every ref that
   must resolve to null). `vk/naga/test/run.ts`: the translator on the shaders
   in `vk/naga/test/shaders/`, validated in a real WebGPU (pushpack.comp
-  also runs and compares every value of a repacked push block);
+  also runs and compares every value of a repacked push block, and
+  subgroup.v13.comp every value of lowered subgroup builtins, under
+  virtual invocations too);
   `corpus.sh`: a real-world corpus (Sascha Willems' examples, vkmark,
   GTK 4, SDL 3). `cargo run --release --features check --example check
   --manifest-path vk/naga/Cargo.toml -- DIR...` parses and validates
@@ -117,7 +141,8 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
   Firefox does (2026-11-24: every translated ggml-vulkan variant of
   llama.cpp's b12674 release and source builds, with and without
   `shader-f16`, and the corpus pass; subgroup variants are skipped,
-  naga 30 refuses `enable subgroups`).
+  naga 30 refuses `enable subgroups`, which gated_delta_net and ssm_scan,
+  subgroup builtins without operations, no longer have: they pass).
 - `node test/vk/relay.mjs -- CMD` runs CMD (e.g. `vulkaninfo --summary`,
   `vendor/build/vk/native/vk-compute`) on this host against the renderer
   in headless Chrome, with `KWVK_LINK` and the native manifest set;
@@ -174,8 +199,8 @@ app -> Vulkan loader (Debian libvulkan1) -> /usr/lib/kw/libvulkan_kw.so (vk/icd)
 
 ## What runs (2026-11-24, SwiftShader WebGPU)
 
-Nothing was run on a real GPU: every number is software WebGPU on this
-host's CPU, with the guest under kwemu.
+Every number is software WebGPU on this host's CPU, with the guest under
+kwemu, except the subgroup size's effect on the user's GPU (below).
 
 - unkernel-check, inline and worker mode, with `--lose`, `--snapshot` and
   `--cpus 2`: all steps pass; the renderer loads at the first connection
@@ -198,17 +223,46 @@ host's CPU, with the guest under kwemu.
   99`, temperature 0) gives the CPU backend's text: 8.5 tokens/s in the
   guest (llama-simple, inline mode, one CPU; Performance below) against
   0.25 on the emulated CPU, 9.5 natively through the relay; the release build's llama-completion 5.1-6.9 tokens/s
-  in the page (one CPU). stories15M, q4_0 and F32 alike, aborts at its
-  first pipeline the host cannot make ("ggml_vulkan: compute pipeline
-  creation failed for rms_norm_mul_f32_512: ... ErrorInvalidShaderNV",
-  after the ICD's reason; below); stories260K's 64-wide rows take another
-  variant. Compute shaders wider than the device's
-  workgroup limit (ggml's are 512, SwiftShader allows 256) are split by
-  the translator where they have no barriers or shared memory. 139 of
+  in the page (one CPU). Natively through the relay on SwiftShader with
+  an unpatched llama.cpp (llama-simple, 32 tokens, `-ngl 99`): stories15M
+  q4_0 gives the CPU backend's text at 1.0 tokens/s, SmolLM2 135M Q4_K_M
+  "...dreams of becoming a detective. I spent years honing my skills,
+  attending law school, ..." (the CPU backend's for its first 15 tokens)
+  at 0.32 tokens/s, Qwen2.5 0.5B Q4_K_M at 0.11 tokens/s (24 tokens; the
+  CPU backend's text differs from the fourth on). The subgroup size the
+  ICD reports (32, before 1; vk/PROTOCOL.md, Amendments, "Subgroup size")
+  sizes ggml's mat-vec, soft_max, argmax and sum_rows workgroups; the
+  texts are the same at 1 and 32. Tokens/s at 1 and 32 natively through
+  the relay: stories260K 9.9 and 5.0, stories15M q4_0 1.69 and 1.20,
+  SmolLM2 0.33 and 0.32, Qwen2.5 0.12 and 0.16. The small models lose on
+  SwiftShader: a mat-vec over 64 columns (stories260K's rows) or 8 (its
+  attention heads) gives an invocation of 32 at most 2 elements, then a
+  5-step shared-memory reduction, and SwiftShader pays on the CPU for
+  every invocation and barrier (GGML_VK_PERF_LOGGER: its mat-vecs 30 ms
+  a token at 1, 122 at 32); longer rows gain. On the user's GPU (Apple M4
+  Pro, Chrome, the page, Qwen2.5 0.5B Q4_K_M, `KWVK_SUBGROUP_SIZE=32`
+  before it was the default) 75 ms a token became 21.4 (13 to 47
+  tokens/s; 18.8 ms with no GPU work), the same text. Compute shaders wider than the device's workgroup
+  limit (ggml's are 512, SwiftShader allows 256) are split by the
+  translator where they have no barriers or shared memory, and run as
+  virtual invocations where they have (the norm family, soft_max_wg512,
+  get_rows of the iq types). 139 of
   ggml's 156 shader variants translate and compile. Its
   `test-backend-ops` against the CPU backend (partial runs): GET_ROWS,
   SILU, SOFT_MAX, ROPE pass; CPY 209 of 211, ADD 90 of 97, MUL_MAT 209
-  of 249, RMS_NORM 41 of 123.
+  of 249; RMS_NORM, NORM, GROUP_NORM, L2_NORM, RMS_NORM_BACK, SOFT_MAX,
+  CROSS_ENTROPY_LOSS(_BACK) and GET_ROWS 617 of 617 without bf16, RMS_NORM
+  bf16 at 64 columns 11 of 11 (at 1025 the 512-wide bf16 variant is
+  refused, which aborts the run). At subgroup size 32 and 1 alike: SOFT_MAX
+  215, ARGMAX 7, SUM_ROWS 11, IM2COL 113, RMS_NORM f32 61 and
+  GATED_DELTA_NET 81 (all but the replay variants, which are refused: 11
+  storage buffers, a barrier WebGPU takes as non-uniform) pass; SSM_SCAN
+  is not supported (ggml wants subgroup operations); MUL_MAT's mat-vec
+  cases (n up to 8) of f32, f16, q4_0, q5_0, q8_0, q4_K and q6_K pass,
+  449 of them, until a storage binding at offset 4480, which WebGPU
+  refuses (not a multiple of 256), loses the device. GATED_DELTA_NET
+  failed all 16 cases tried at 32 before its subgroup builtins were
+  lowered (SwiftShader's subgroups are not 32 wide).
 - Ollama 0.40.18: its runner is llama.cpp's llama-server (b12651). It runs
   as its `bin/ollama` plus llama.cpp's own arm64 Vulkan build of that tag
   (the page's Ollama app; web.md, Guest Vulkan). Its discovery
@@ -226,9 +280,18 @@ host's CPU, with the guest under kwemu.
 
   F16 weights run too. stories260K converted by llama-quantize gave the CPU
   backend's text with llama.cpp natively, and ran 100% GPU at 6.2 tokens/s
-  with Ollama in the guest. SmolLM2 135M and Qwen2.5-Coder 0.5B (F16)
-  abort at rms_norm_mul_f32_512 on SwiftShader. Neither has been run on a
-  real GPU.
+  with Ollama in the guest. rms_norm_mul_f32_512, where SmolLM2 135M and
+  Qwen2.5-Coder 0.5B (F16) stopped on SwiftShader, is made there now (as
+  virtual invocations); neither F16 model has been run since. The page's
+  Ollama app offers the registry's quantized tags now (web.md, Guest
+  Vulkan): llama.cpp b12651's own x86-64 Vulkan build, natively through
+  the relay, ran Ollama's `qwen3:0.6b` (Q4_K_M) and `qwen3.5:0.8b` (Q8_0)
+  GGUFs with every layer on kwvk, no pipeline refused, the token
+  embeddings' lookup the only op on the CPU (2 graph splits), and sane
+  text (2026-11-24). Ollama's `qwen3.5:0.8b` tag also carries an MTP
+  draft, for which Ollama starts llama-server with speculative decoding:
+  that needs the refused gated_delta_net replay variants, so the app
+  takes `qwen3.5:0.8b-q8_0` (the same weights, no draft).
 - Presentation: below.
 
 ## Device memory (2026-11-24)
@@ -407,13 +470,22 @@ also waited for the GPU's queue (`onSubmittedWorkDone`).
   VK_EXT_physical_device_drm. Before offering either, export
   `LIBGL_KOPPER_DISABLE=1` in the base profile (and keep zink off EGL), or
   GL would draw through zink on kwvk.
-- llama.cpp: quantized models (q4_0) and part of MUL_MAT cannot run (their
-  pipelines are refused, so ggml aborts): about 29 shader variants fail
-  Tint's uniformity analysis (`workgroupBarrier` outside uniform control
-  flow); the norm family (norm, rms_norm, group_norm, l2_norm, the fused
-  rms_norm_mul) reduces across a 512-wide workgroup through shared memory
-  and cannot be split on a 256-limit device, which stops F32 models wider
-  than stories260K there too. Eval is bound by GPU time on SwiftShader
+- llama.cpp: some pipelines are refused, and ggml aborts at the first it
+  needs (2026-11-24, every variant ggml declares on a 256-invocation
+  device: 1807 of 1854 compile). Tint's uniformity analysis
+  (`workgroupBarrier` outside uniform control flow) refuses
+  quantize_q8_1_x4 (an early return before its barriers), rwkv_wkv6/7 and
+  gated_linear_attn (loop bounds that depend on the invocation),
+  count_experts and topk_radix (branches on workgroup memory before
+  barriers); count_experts stops MUL_MAT_ID, so mixture-of-experts models
+  abort although the matmul_id pipelines are made (with their read-only
+  buffers kept: vk/PROTOCOL.md, Amendments, "Read-only buffers kept").
+  Speculative decoding of gated-delta-net models (Ollama's Qwen3.5 tags
+  with an MTP draft) needs gated_delta_net's replay variants, refused (11
+  storage buffers). On a 256-invocation device the 512-wide bf16 rms_norm variants and
+  rms_norm_mul_rope_*_512 are refused (their barriers are in a function
+  spirv-opt did not inline, which virtual invocations do not take).
+  Eval is bound by GPU time on SwiftShader
   natively, and in the guest also by ggml's waited copies (Device memory
   below). Never run on a real GPU.
 - Chrome-specific reliances: the `texture-component-swizzle` feature
@@ -444,7 +516,8 @@ Amendments, "Loud failures", is the contract.
   compilation and WebGPU's validation, so vkCreate{Compute,Graphics}Pipelines
   returns VK_ERROR_INVALID_SHADER_NV (translation or Tint errors, e.g. a
   barrier in non-uniform control flow, a 512-wide workgroup with shared
-  memory on a 256-invocation device) or VK_ERROR_FEATURE_NOT_PRESENT
+  memory on a 256-invocation device that cannot run as virtual
+  invocations) or VK_ERROR_FEATURE_NOT_PRESENT
   (adjacency or patch topologies), with the reason. Pipelines that only
   declare texel buffers or 1D-array storage images are made "unusable" (vkd3d
   makes such pipelines at start-up and never runs them): binding one makes

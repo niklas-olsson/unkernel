@@ -1,0 +1,40 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// Barriers WGSL cannot take as uniform that flow.rs must leave alone, so
+// that WebGPU still refuses them (run.ts). SHAPE 0: the continue sits under
+// an if that more statements of the loop body follow (the barrier is
+// uniform in Vulkan, but the pass does not reach this shape). SHAPE 1: the
+// trip count depends on the invocation, so the barrier is not uniform at
+// all.
+layout(local_size_x = 16) in;
+layout(constant_id = 0) const uint SHAPE = 0;
+layout(push_constant) uniform P { uint n; } p;
+layout(std430, binding = 0) buffer D { float d[]; };
+shared float sh[16];
+
+void main() {
+	const uint tid = gl_LocalInvocationID.x;
+	float acc = 0.0;
+	if (SHAPE == 0) {
+		for (uint k = 0; k < p.n; ++k) {
+			barrier();
+			sh[tid] = float(k + tid);
+			barrier();
+			if (tid < 8) {
+				if (d[tid] > 0.0)
+					continue;
+				acc += sh[(tid + 1) % 16];
+			}
+			acc += 1.0;
+		}
+	} else {
+		for (uint k = tid; k < p.n; ++k) {
+			barrier();
+			sh[tid] = float(k);
+			barrier();
+			acc += sh[(tid + 1) % 16];
+		}
+	}
+	d[tid] = acc;
+}

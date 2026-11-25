@@ -22,32 +22,41 @@
 // app's sign-in and settings) is not touched. fx-local.sh merges the
 // connection into that settings.json with jq on every run (fx's own saved
 // preferences there stay), and selects it per run with FX_PROVIDER=local and
-// FX_MODEL, with FX_AUTO_UPGRADE=0. The server's OLLAMA_CONTEXT_LENGTH and
+// FX_MODEL, with FX_AUTO_UPGRADE=0 and FX_PERMISSION_MODE=full-access (fx
+// runs its tool calls without asking: a small model's turns are slow enough,
+// and the guest is the sandbox; an FX_PERMISSION_MODE of the caller's
+// stays). The server's OLLAMA_CONTEXT_LENGTH and
 // the connection's context_window agree: CTX, by default the model's
-// trained context (8192 for SmolLM2) but 16384 for Qwen2.5 (of 32768:
-// device memory), and context_window never above what Ollama's /api/show
+// trained context (8192 for SmolLM2) but 16384 for Qwen2.5 and Qwen3 (of
+// 32768 and 40960: device memory; Qwen3's KV cache is 112 KiB a token, 1.75
+// GiB at 16384), and context_window never above what Ollama's /api/show
 // reports for the model; supports_tool_use is what /api/show's capabilities
 // say ("tools": from the model's template), or OLLAMA_MODEL_TOOLS for the
 // Ollama app's own default, or TOOLS=0|1.
 //
-// On a terminal fx-local.sh asks which model; the first and default is Qwen2.5 0.5B Instruct (F16, 994 MiB, Ollama's library
-// tag qwen2.5:0.5b-instruct-fp16; ollama.sh's MODEL=qwen), the smallest
-// model ollama.sh offers that calls fx's tools. Qwen2.5-Coder 0.5B
-// (MODEL=qwen-coder: the same architecture, size and memory) answered fx
-// with JSON in a code block instead of a tool call in three tasks of three;
-// Qwen2.5 0.5B made real tool calls in two (fx 0.0.17, Ollama 0.40.18 and
-// llama.cpp b12651 on the host's CPU, 2026-11-24). fx needs tools: it sends
-// its tools with every request whatever supports_tool_use says, and Ollama answers a
-// model without them with HTTP 400 ("does not support tools": SmolLM2 135M,
-// the user's first run on a real GPU, 2026-11-24, where it did load; and the
-// Ollama app's story model, which has no chat template). So fx-local.sh
-// stops before fx with such a model (SmolLM2 is served as smollm2-tools,
-// under a template of ollama.sh's with a tool section). Qwen2.5 aborts on
-// software WebGPU (SwiftShader) at a 512-wide shader; on real GPUs (the
-// user's, 2026-11-24) Qwen2.5 0.5B loads and answers fx, but describes or
-// invents tool results more often than it calls a tool: Qwen2.5 1.5B
-// (MODEL=qwen1.5) is the larger choice. The model runs at temperature 0
-// (TEMP=), and a thinking model without its reasoning (THINK=1 for it).
+// On a terminal fx-local.sh asks which model; the first and default is
+// Qwen3 1.7B (Q4_K_M, 1296 MiB, Ollama's library tag qwen3:1.7b; ollama.sh's
+// MODEL=qwen3-1.7b; guest memory 3 GiB or more), a thinking model with tools
+// (it thinks before its answers here; THINK=0 turns that off). The models
+// are the registry's quantized
+// tags, which run on guest Vulkan since 2026-11-24 (ollama.ts). Qwen3 0.6B
+// (MODEL=qwen3, 498 MiB) is the quicker choice: fx 0.0.17 on it (Ollama
+// 0.40.18 and llama.cpp b12651 on the host's CPU, temperature 0, no
+// thinking, 2026-11-24) wrote a requested file with a real write_file call
+// (one task tried). Qwen2.5 0.5B (MODEL=qwen) made real tool calls in two
+// tasks of three, Qwen2.5-Coder 0.5B (MODEL=qwen-coder) in none (JSON in a
+// code block instead), and on a real GPU (the user's, 2026-11-24) Qwen2.5
+// 0.5B answered fx but described or invented tool results more often than
+// it called a tool (all three as fp16 tags then). fx needs tools: it sends
+// its tools with every request whatever supports_tool_use says, and Ollama
+// answers a model without them with HTTP 400 ("does not support tools":
+// SmolLM2 135M, the user's first run on a real GPU, 2026-11-24, where it did
+// load; and the Ollama app's story model, which has no chat template). So
+// fx-local.sh stops before fx with such a model (SmolLM2 is served under a
+// template of ollama.sh's with a tool section). On software WebGPU
+// (SwiftShader) the models run, at a token every few seconds: too slow for
+// fx's prompts. The model runs at temperature 0 (TEMP=), and a thinking
+// model reasons before its answers unless THINK=0 (reasoning_effort "none").
 import type { TerminalApp } from "../types.ts";
 import ollama, { OLLAMA_MODEL, OLLAMA_MODEL_CTX, OLLAMA_MODEL_TOOLS } from "./ollama.ts";
 
@@ -60,16 +69,20 @@ const FX_LOCAL_SH = String.raw`#!/bin/bash
 # server (SERVE=1 ollama.sh) on guest Vulkan (kwvk: this browser's WebGPU),
 # as fx's custom connection "local". Written by the unkernel launcher's
 # "fx (local model)" app.
-#   ./fx-local.sh                       asks which model (on a terminal); Enter: Qwen2.5 0.5B Instruct (F16, 994 MiB): tool calls; guest memory 3 GiB or more
-#   MODEL=smollm2 ./fx-local.sh         SmolLM2 135M Instruct (F16, 271 MiB): the fastest; tool calls through a template of ours, seldom right
-#   MODEL=qwen1.5 ./fx-local.sh         Qwen2.5 1.5B Instruct (F16, 2950 MiB): far better at tool calls; guest memory 4 GiB
-#   MODEL=llama3.2 ./fx-local.sh        Llama 3.2 1B Instruct (F16, 2364 MiB)
-#   MODEL=qwen-coder ./fx-local.sh      Qwen2.5-Coder 0.5B Instruct (the same size): better code, but rarely calls fx's tools
-#   MODEL=PATH.gguf|NAME ./fx-local.sh  another F32 or F16 model, as ollama.sh takes it
+#   ./fx-local.sh                       asks which model (on a terminal); Enter: Qwen3 1.7B (Q4_K_M, 1296 MiB): tool calls; guest memory 3 GiB or more
+#   MODEL=qwen3 ./fx-local.sh           Qwen3 0.6B (Q4_K_M, 498 MiB): quicker, weaker at tool calls
+#   MODEL=qwen1.5 ./fx-local.sh         Qwen2.5 1.5B Instruct (Q4_K_M, 940 MiB): tool calls, no thinking
+#   MODEL=qwen ./fx-local.sh            Qwen2.5 0.5B Instruct (Q4_K_M, 379 MiB): calls tools, seldom well
+#   MODEL=qwen3.5 ./fx-local.sh         Qwen3.5 0.8B (Q8_0, 971 MiB): newer; untried with fx
+#   MODEL=llama3.2 ./fx-local.sh        Llama 3.2 1B Instruct (Q8_0, 1259 MiB)
+#   MODEL=smollm2 ./fx-local.sh         SmolLM2 135M Instruct (Q4_K_M, 100 MiB): the fastest; tool calls through a template of ours, seldom right
+#   MODEL=qwen-coder ./fx-local.sh      Qwen2.5-Coder 0.5B Instruct (379 MiB): better code, but rarely calls fx's tools
+#   MODEL=PATH.gguf|NAME ./fx-local.sh  another model, as ollama.sh takes it
 #   CTX=N                               the context length (server and fx; default: the model's, at most 16384)
 #   TEMP=N                              the sampling temperature (default 0; TEMP=model for the model's own)
-#   THINK=1                             let a thinking model (Qwen3, Qwen3.5) reason before answers (default: off)
+#   THINK=0                             stop a thinking model (Qwen3, Qwen3.5) reasoning before answers: quicker turns (default: it thinks)
 #   TOOLS=0|1                           declare tool use off or on (default: what Ollama reports)
+#   FX_PERMISSION_MODE=auto|ask         fx's permission mode (default here: full-access, no questions before tool calls)
 # fx's settings for this: FX_HOME=$PWD/fx-home (your ~/.fx is not touched).
 set -e
 OLLAMA_DIR="${OLLAMA_DIR.replace(/^~(?=\/)/, "$HOME")}"
@@ -94,7 +107,7 @@ command -v jq >/dev/null || die "No jq (the launcher installs it): sudo apt-get 
 # change it later), which fx's context_window matches.
 
 # No MODEL= on a terminal: ask. Enter takes the first; a number, or any
-# other name ollama.sh takes (an Ollama name with an fp16 tag, a .gguf).
+# other name ollama.sh takes (an Ollama name, a .gguf).
 pick_model() {
 	local i=0 k l ans
 	printf "$B%s$N\n" "Which model? (Enter: 1; or type an Ollama name or a .gguf path; MODEL=... skips this)"
@@ -116,21 +129,23 @@ MENU
 	esac
 }
 if [ -z "$MODEL" ] && [ -t 0 ]; then
-	pick_model 'qwen|Qwen2.5 0.5B (994 MiB): the smallest that calls tools, seldom well
-qwen1.5|Qwen2.5 1.5B (2950 MiB): far better at tool calls; guest memory 4 GiB
-llama3.2|Llama 3.2 1B (2364 MiB)
-qwen3.5|Qwen3.5 0.8B (1684 MiB, BF16): newer, untried on guest Vulkan
-smollm2|SmolLM2 135M (271 MiB): the fastest; tool calls seldom right
-qwen-coder|Qwen2.5-Coder 0.5B (994 MiB): better code, rarely calls tools'
+	pick_model 'qwen3-1.7b|Qwen3 1.7B (1296 MiB): tool calls; guest memory 3 GiB or more
+qwen3|Qwen3 0.6B (498 MiB): quicker, weaker at tool calls
+qwen1.5|Qwen2.5 1.5B (940 MiB): tool calls, no thinking
+qwen|Qwen2.5 0.5B (379 MiB): calls tools, seldom well
+qwen3.5|Qwen3.5 0.8B (971 MiB, Q8_0): newer; untried with fx
+llama3.2|Llama 3.2 1B (1259 MiB, Q8_0)
+smollm2|SmolLM2 135M (100 MiB): the fastest; tool calls seldom right
+qwen-coder|Qwen2.5-Coder 0.5B (379 MiB): better code, rarely calls tools'
 fi
-[ -n "$MODEL" ] || MODEL=qwen
+[ -n "$MODEL" ] || MODEL=qwen3-1.7b
 case $MODEL in
 *.gguf) [ ! -e "$MODEL" ] || MODEL=$(realpath "$MODEL") ;;
 esac
 case $MODEL in
 stories260K) c=${OLLAMA_MODEL_CTX} ;;
 smollm2) c=8192 ;;
-qwen | qwen-coder | qwen1.5 | llama3.2 | qwen3.5) c=16384 ;;
+qwen3 | qwen3-1.7b | qwen | qwen-coder | qwen1.5 | llama3.2 | qwen3.5) c=16384 ;;
 *) c=8192 ;;
 esac
 [ -n "$CTX" ] || CTX=$c
@@ -168,10 +183,7 @@ until [ -s "$OLLAMA_DIR/ollama.ready" ]; do
 		# ollama.sh's status: 3 a download failed, 4 a shader refused, 5 device lost.
 		case $st in
 		3) say "A download failed (above: which); run ./fx-local.sh again to resume it." ;;
-		4) case $MODEL in
-			stories260K) ;;
-			*) say "On software WebGPU (SwiftShader) $MODEL aborts at a 512-wide shader: fx on a local model needs a real GPU." ;;
-			esac ;;
+		4) say "Guest Vulkan cannot run one of $MODEL's shaders: try the default, Qwen3 1.7B (./fx-local.sh), or MODEL=qwen3." ;;
 		esac
 		die "ollama.sh stopped before the model was ready (exit $st; above: why)."
 	fi
@@ -204,13 +216,14 @@ fi
 # first reply waits for fx's whole prompt to go through the GPU.
 S=$FXH/settings.json
 { [ -s "$S" ] && jq -e 'type == "object"' "$S" >/dev/null 2>&1; } || echo '{}' >"$S"
-# Thinking (Qwen3, Qwen3.5: Ollama's capability "thinking") is off unless
-# THINK=1: the reasoning before each answer is most of a turn's tokens. fx
-# sends the connection's per-model request fields with each request, and
-# Ollama takes reasoning_effort "none" for no thinking.
+# Thinking (Qwen3, Qwen3.5: Ollama's capability "thinking") stays on unless
+# THINK=0: the reasoning before each answer is most of a turn's tokens, and
+# counts in the reply's limit. fx sends the connection's per-model request
+# fields with each request, and Ollama takes reasoning_effort "none" for no
+# thinking.
 NOTHINK=false
 if printf '%s' "$info" | jq -e '(.capabilities // []) | index("thinking") != null' >/dev/null 2>&1; then
-	case $THINK in 1 | true | yes | on) say "$NAME thinks before it answers (THINK=1): slow turns." ;; *) NOTHINK=true; say "$NAME: thinking off (THINK=1 turns it on)." ;; esac
+	case $THINK in 0 | false | no | off) NOTHINK=true; say "$NAME: thinking off (THINK=0)." ;; *) say "$NAME thinks before it answers (THINK=0 turns that off: quicker turns)." ;; esac
 fi
 jq --arg m "$NAME" --arg url "http://$HOST/v1" --argjson win "$WIN" --argjson out "$OUT" --argjson tools "$T" --argjson nothink "$NOTHINK" '
 	.provider = "local"
@@ -229,12 +242,15 @@ mv "$S.new" "$S"
 printf "$B%s$N\n" "fx on $NAME: context $WIN tokens, replies up to $OUT, tool use $T (the connection local in $S)"
 # fx sends its tools with every request, and Ollama refuses them (HTTP 400)
 # for a model whose template takes none.
-[ "$T" = true ] || die "$NAME cannot call tools (Ollama's capabilities for it), and fx needs them: Ollama would answer its requests with HTTP 400. Run ./fx-local.sh for the default, Qwen2.5 0.5B, or MODEL= another model with tools; to talk with $NAME without fx: cd $OLLAMA_DIR && MODEL=$MODEL ./ollama.sh"
-say "fx works in $PWD/work. Slow: each turn sends fx's whole prompt and tool list through this tab's GPU, so a first reply can take minutes. Quitting fx stops the server."
+[ "$T" = true ] || die "$NAME cannot call tools (Ollama's capabilities for it), and fx needs them: Ollama would answer its requests with HTTP 400. Run ./fx-local.sh for the default, Qwen3 1.7B, or MODEL= another model with tools; to talk with $NAME without fx: cd $OLLAMA_DIR && MODEL=$MODEL ./ollama.sh"
+say "fx works in $PWD/work and runs its tool calls without asking (FX_PERMISSION_MODE=auto or ask to change). Slow: each turn sends fx's whole prompt and tool list through this tab's GPU, so a first reply can take minutes. Quitting fx stops the server."
+# fx asks nothing before a tool call (full-access) unless the caller set a mode.
+PERM=$FX_PERMISSION_MODE
+[ -n "$PERM" ] || PERM=full-access
 cd work
 trap : INT
 set +e
-FX_HOME=$FXH FX_PROVIDER=local FX_MODEL=$NAME FX_AUTO_UPGRADE=0 fx
+FX_HOME=$FXH FX_PROVIDER=local FX_MODEL=$NAME FX_AUTO_UPGRADE=0 FX_PERMISSION_MODE=$PERM fx
 exit $?
 `;
 
@@ -246,19 +262,23 @@ const README = "fx, the coding agent, talking to a model that runs in this brows
 	"~/.apps/fx-local/fx-home (FX_HOME): your own ~/.fx is not touched.\n" +
 	"\n" +
 	"fx-local.sh asks which model (MODEL=NAME skips the question). The first is\n" +
-	"Qwen2.5 0.5B Instruct (F16, 994 MiB, fetched once): small, and it can call\n" +
-	"tools, which fx needs, though it often answers without calling one; Qwen2.5\n" +
-	"1.5B (MODEL=qwen1.5, 2950 MiB, guest memory 4 GiB) does better. The model\n" +
-	"runs at temperature 0 (TEMP=N) and without thinking (THINK=1). It needs guest memory\n" +
-	"of 3 GiB or more (Settings) and a GPU whose WebGPU allows 512-wide\n" +
-	"workgroups (most real GPUs; not software WebGPU, SwiftShader, where it\n" +
-	"aborts). Others:\n" +
-	"  MODEL=qwen-coder ./fx-local.sh    (Qwen2.5-Coder 0.5B, the same size: better\n" +
-	"                                     code, but rarely calls fx's tools)\n" +
+	"Qwen3 1.7B (Q4_K_M, 1296 MiB, fetched once): small, and it can call tools,\n" +
+	"which fx needs, though models this small often answer without calling one.\n" +
+	"The model runs at temperature 0 (TEMP=N); Qwen3 thinks before it answers\n" +
+	"(THINK=0 ./fx-local.sh: no thinking, quicker turns). fx runs its tool calls\n" +
+	"(commands, file writes) without asking, in ./work (FX_PERMISSION_MODE=auto\n" +
+	"or ask ./fx-local.sh for fx's usual checks). It\n" +
+	"needs guest memory of 3 GiB or more (Settings) and a real GPU to be usable\n" +
+	"(software WebGPU, SwiftShader, runs it at a token every few seconds).\n" +
+	"Others:\n" +
+	"  MODEL=qwen3 ./fx-local.sh         (Qwen3 0.6B, 498 MiB: quicker, weaker at\n" +
+	"                                     tool calls)\n" +
+	"  MODEL=qwen-coder ./fx-local.sh    (Qwen2.5-Coder 0.5B: better code, but\n" +
+	"                                     rarely calls fx's tools)\n" +
 	"  MODEL=NAME ./fx-local.sh          (another model of Ollama's library with\n" +
-	"                                     tools, an fp16 tag; fx cannot use a model\n" +
-	"                                     without tools, such as smollm2)\n" +
-	"  MODEL=PATH.gguf ./fx-local.sh     (another F32 or F16 GGUF with tools)\n" +
+	"                                     tools; fx cannot use a model without\n" +
+	"                                     tools, such as stories260K)\n" +
+	"  MODEL=PATH.gguf ./fx-local.sh     (another GGUF with tools)\n" +
 	"  CTX=4096 ./fx-local.sh            (a smaller context: less device memory)\n" +
 	"\n" +
 	"Slow and limited: every turn sends fx's whole prompt and tool list (thousands\n" +
@@ -268,8 +288,8 @@ const README = "fx, the coding agent, talking to a model that runs in this brows
 	"search and remote MCP servers still use the network (update checks are off\n" +
 	"for this run).\n" +
 	"\n" +
-	"If it fails: quantized models (q4_0, q4_K_M ...) abort on guest Vulkan for\n" +
-	"now (F32 and F16 run); the driver reports 4 GiB of GPU memory (KWVK_HEAP_MB=N sets it), so a\n" +
+	"If it fails: guest Vulkan cannot run some models (mixture-of-experts ones\n" +
+	"abort at a refused shader); the driver reports 4 GiB of GPU memory (KWVK_HEAP_MB=N sets it), so a\n" +
 	"model and its context that do not fit load partly or not at all on the GPU:\n" +
 	"more guest memory (Settings), or a smaller CTX; a lost WebGPU device: run\n" +
 	"./fx-local.sh again.\n";
@@ -277,7 +297,7 @@ const README = "fx, the coding agent, talking to a model that runs in this brows
 export default {
 	id: "fx-local",
 	title: "fx (local model)",
-	desc: "fx on a model in this browser's GPU: Ollama on guest Vulkan as fx's local connection; asks which model (Qwen2.5 0.5B, 994 MiB, guest memory 3 GiB or more; or larger ones), fetched with Ollama and llama.cpp on first run",
+	desc: "fx on a model in this browser's GPU: Ollama on guest Vulkan as fx's local connection; asks which model (Qwen3 1.7B, 1296 MiB, guest memory 3 GiB or more; or smaller ones), fetched with Ollama and llama.cpp on first run",
 	icon: "𝒇x",
 	// fx's tile in the Ollama app's teal.
 	colors: ["#0f766e", "#09090b"],

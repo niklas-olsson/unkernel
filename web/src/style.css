@@ -40,7 +40,7 @@
 	color-scheme: dark;
 	--sl: env(safe-area-inset-left, 0px); --sr: env(safe-area-inset-right, 0px);
 	--st: env(safe-area-inset-top, 0px); --sb: env(safe-area-inset-bottom, 0px);
-	/* The Dock's strip height (the workspace ends above it), without the bottom safe area. */
+	/* The Dock's strip height (the workspace ends above it), without the bottom safe area (#app.compact below: lower). */
 	--dock-h: 60px;
 	/* Extra side padding of the Dock where the screen's or window's bottom corners are round (iOS and macOS, below). */
 	--sc: 0px;
@@ -118,10 +118,9 @@
 :root.mac-window { --sc: 8px; }
 /* iOS (only its WebKit knows -webkit-touch-callout): the page keeps the top
    safe area (status bar, notch, Dynamic Island) and three quarters of the
-   bottom one (25 px on a Face ID iPhone in portrait). The Dock sits that far
-   above the bottom edge, over the wallpaper that goes on under the home
-   indicator, and keeps its ends away from the round corners by half the
-   bottom inset. Not while the on-screen keyboard is up (App.tsx sets kb):
+   bottom one (25 px on a Face ID iPhone in portrait). The Dock's tiles sit
+   that far above the bottom edge, its bar going on under the home indicator,
+   and keep away from the round corners by half the bottom inset. Not while the on-screen keyboard is up (App.tsx sets kb):
    nothing is at the screen's bottom edge then. */
 @supports (-webkit-touch-callout: none) {
 	:root { --sb: calc(env(safe-area-inset-bottom, 0px) * 0.75); --sc: calc(env(safe-area-inset-bottom, 0px) / 2); }
@@ -452,7 +451,8 @@
    starts --tb-space below the top safe area: the bar's height, or nothing
    while the on-screen keyboard is up (kb, where the bar is hidden). Like
    macOS's menu bar it has no background (nothing else is ever under it):
-   its text and icons read by their own soft shadow. Its tokens (--tb-*) are
+   its text and icons read by their own soft shadow. While a maximized window
+   is shown (data-dark, TopBar.tsx) and in compact mode it is nearly black. Its tokens (--tb-*) are
    on :root above. */
 :root.kb { --tb-space: 0px; }
 :root.kb #topbar { display: none; }
@@ -464,6 +464,8 @@
 	color: var(--color-fg); font-size: 13px; line-height: 1; white-space: nowrap; text-shadow: var(--tb-shadow);
 	user-select: none; -webkit-user-select: none;
 }
+#topbar { transition: background-color .2s ease-out; }
+#topbar[data-dark], #app.compact #topbar { background: rgb(8 8 8 / 92%); }
 #topbar :focus-visible { outline-offset: -2px; }
 .tb-left, .tb-right { display: flex; align-items: center; gap: 1px; height: 100%; min-width: 0; }
 .tb-left { flex: 0 1 auto; }
@@ -509,10 +511,11 @@
 .tb-btn[data-tone="warn"] { color: var(--color-warn); }
 .tb-btn[data-tone="err"] { color: var(--color-err); }
 #app[data-state="halted"] :is(#tb-cpu, #tb-mem, #tb-disk, #tb-net, #tb-gpu) { color: var(--color-off); }
-/* Over a light wallpaper (desktop.ts: data-wallpaper on the root) the bar's
+/* Over a light wallpaper (desktop.ts: data-wallpaper on the root), unless the
+   bar is nearly black (:where(): no added specificity), the bar's
    text and icons are dark with a light shadow, as on macOS. The amber and
    red tones and the error state keep their colours. */
-:root[data-wallpaper="light"] #topbar {
+:root[data-wallpaper="light"] :where(#app:not(.compact)) #topbar:where(:not([data-dark])) {
 	--tb-shadow: 0 1px 1px rgb(255 255 255 / 40%);
 	color: #111;
 	& .tb-btn:not([data-tone]) { color: rgb(17 17 17 / 88%); }
@@ -523,7 +526,7 @@
 	& .tb-off { color: rgb(17 17 17 / 50%); }
 	& .tb-track { fill: rgb(0 0 0 / 22%); }
 }
-:root[data-wallpaper="light"] #app:not([data-state="halted"], [data-state="error"]) #topbar #tb-status { color: #111; }
+:root[data-wallpaper="light"] #app:not([data-state="halted"], [data-state="error"]):where(:not(.compact)) #topbar:where(:not([data-dark])) #tb-status { color: #111; }
 
 /* ---- the Dock (components/Dock.tsx): its strip (#dock) ends the workspace;
    the pill floats on the wallpaper. */
@@ -533,7 +536,19 @@
 	font-size: 12px; line-height: 1;
 }
 /* The on-screen keyboard is up (App.tsx): the windows get the Dock's height (the key bar stays). */
-:root.kb #dock { display: none; }
+:root.kb #dock, :root.kb #dock-edge { display: none; }
+/* A maximized window is shown (data-auto, Dock.tsx useReveal): the Dock is out
+   of the flow, so the workspace has its strip, and over the windows, hidden
+   below the page (data-hidden; its shadow too) until the pointer is at the
+   page's bottom edge (#dock-edge, under the pill). Only the pill takes the
+   pointer then. `translate`, which slideOffset() there reads. */
+#dock { transition: translate .22s cubic-bezier(.2, .8, .2, 1); }
+#dock[data-auto] { position: absolute; left: 0; right: 0; bottom: 0; pointer-events: none; }
+#dock[data-auto] > .dock-pill { pointer-events: auto; }
+#dock[data-auto] > .wp-credit { display: none; }
+#dock[data-hidden] { translate: 0 calc(100% + 40px); }
+#dock-edge { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; touch-action: none; }
+@media (any-pointer: coarse) { #dock-edge { height: 14px; } }
 /* The pill: its glass (the --glass-* tokens) is a layer of its own under the
    tiles (::before), so it can widen while they magnify (--grow-l, --grow-r:
    Dock.tsx useMagnify) and so the menus inside the Dock blur the page behind
@@ -616,6 +631,20 @@
 /* No pinned or window tiles: the strip goes, and the separator after it. */
 .dock-apps:empty { display: none; }
 .dock-apps:empty + .dock-sep { display: none; }
+/* Compact mode (phones, narrow viewports): a lower bar across the page, its
+   glass on to the bottom edge (under the home indicator), the tiles centered;
+   a tile's target stays wider than its face. */
+#app.compact { --dock-h: 46px; --dock-tile: 34px; }
+#app.compact #dock { padding: 0; }
+#app.compact .dock-pill {
+	width: 100%; height: 100%; justify-content: center; border-radius: 0;
+	padding: 4px max(8px, var(--sr), var(--sc)) var(--sb) max(8px, var(--sl), var(--sc));
+}
+#app.compact .dock-pill::before { left: 0; right: 0; border-width: 1px 0 0; box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%); }
+#app.compact :is(.dock-pill, .dock-apps) { gap: 2px; }
+#app.compact .dock-tile { width: 40px; }
+#app.compact .dock-face { margin-inline: auto; border-radius: 10px; }
+#app.compact .dock-disc { width: 84%; height: 84%; }
 /* The running dot, with a faint dark rim so it shows over a bright page too. */
 .dock-dot { position: absolute; bottom: 1px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: rgb(255 255 255 / 80%); box-shadow: 0 0 0 1px rgb(0 0 0 / 30%); }
 .dock-dot[data-dot="dim"] { background: rgb(255 255 255 / 38%); }

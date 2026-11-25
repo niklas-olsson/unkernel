@@ -58,8 +58,8 @@ fn multiple(s: c.St, inst: u32) c.Error!c.Exit {
     const n = c.rn(inst);
     const t = c.rd(inst);
     const base = c.xsp(s, n);
-    // memory as 64-bit words (no aggregate copies of buf: on wasm without
-    // bulk memory those become memcpy calls)
+    // memory as 64-bit words (no aggregate copies of buf: on wasm those
+    // become memory.copy)
     var buf: [8]u64 = undefined;
     if (c.bit(inst, 22)) {
         for (0..8) |i| {

@@ -551,6 +551,7 @@ export function serveKernel(port: WorkerPort, options: ServeKernelOptions = {}):
 			break;
 		case "vsock":
 			if (instance) for (const p of msg.packets) instance.kernel.vsock.deliver(p);
+			shared?.vsockAck();
 			break;
 		case "shm": {
 			// Runs here, where the kernel's memory is: a read copies once and transfers the bytes.

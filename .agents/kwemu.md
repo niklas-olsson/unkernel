@@ -26,7 +26,8 @@ machinery that is unchanged.
 | `test/kwemu-bench.mjs` | benchmark table (a64/performance.md) |
 
 `zig build` writes `zig-out/lib/{kwemu.o,libkwemu.a}` (wasm64, cpu `mvp` +
-memory64 only, undefined `__stack_pointer`), `zig-out/lib/kwemu-jit.o`,
+memory64, bulk memory, sign-ext and nontrapping-fptoint, undefined
+`__stack_pointer`), `zig-out/lib/kwemu-jit.o`,
 `zig-out/lib/native/libkwemu.a`, `zig-out/bin/kwemu-harness{,.wasm}`,
 `kwemu-harness-jit.wasm`, and the A64 tools and guests.
 

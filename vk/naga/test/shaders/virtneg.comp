@@ -1,0 +1,35 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// 512-wide workgroups with barriers the virtual invocations of virt.rs
+// must not run (run.ts). SHAPE 0: the barrier is in a function other than
+// the entry point (as in SPIR-V that spirv-opt did not inline: llama.cpp's
+// bf16 rms_norm), which the pass refuses, so the translation fails as
+// before. SHAPE 1: a loop whose trip count depends on the invocation
+// contains the barrier (undefined in Vulkan unless no invocation reaches
+// it): the pass would take one virtual invocation's condition (or its
+// break) for all, so its uniformity check refuses it.
+layout(local_size_x = 512) in;
+layout(constant_id = 0) const uint SHAPE = 0;
+layout(push_constant) uniform P { uint n; } p;
+layout(std430, binding = 0) buffer D { float d[]; };
+shared float sh[512];
+
+void sync_add(uint tid) {
+	sh[tid] = d[tid];
+	barrier();
+	d[tid] = sh[511u - tid];
+}
+
+void main() {
+	const uint tid = gl_LocalInvocationID.x;
+	if (SHAPE == 0) {
+		sync_add(tid);
+	} else {
+		for (uint i = tid; i < p.n; i += 512u) {
+			sh[tid] = d[i];
+			barrier();
+			d[i] = sh[511u - tid];
+		}
+	}
+}

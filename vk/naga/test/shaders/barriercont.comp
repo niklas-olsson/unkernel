@@ -1,0 +1,49 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// llama.cpp's mul_mat_vec_q2_k/q3_k/q6_k shape (calc_superblock with
+// all_threads false, inlined): a barrier in a loop whose own condition is
+// uniform, then a continue on an index that depends on the invocation,
+// which WGSL's uniformity analysis refuses unless flow.rs moves the rest of
+// the body into an else branch. Groups of 4 invocations share a block
+// index i (each reads a neighbour's shared value, so the barrier matters);
+// a group past the last block skips the rest of the iteration. run.ts
+// dispatches it and compares every output with the same sums computed in
+// JavaScript.
+layout(local_size_x = 16) in;
+layout(push_constant) uniform P { uint nb; uint rows; } p;
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer D { float d[]; };
+shared float sc[2][16];
+float acc[2];
+uint csel = 0;
+
+void main() {
+	const uint tid = gl_LocalInvocationID.x;
+	const uint ix = tid / 4, lane = tid % 4;
+	acc[0] = 0.0;
+	acc[1] = 0.0;
+	const uint full = p.nb - p.nb % 4;
+	uint i0 = 0;
+	for (; i0 < full; i0 += 4) {
+		const uint i = i0 + ix;
+		for (uint n = 0; n < p.rows; ++n) {
+			csel ^= 1;
+			sc[csel][tid] = a[(n * p.nb + i) * 4 + lane];
+			barrier();
+			acc[n] += sc[csel][ix * 4 + (lane + 1) % 4] * float(i + 1);
+		}
+	}
+	const uint i = i0 + ix;
+	for (uint n = 0; n < p.rows; ++n) {
+		csel ^= 1;
+		if (i < p.nb)
+			sc[csel][tid] = a[(n * p.nb + i) * 4 + lane];
+		barrier();
+		if (i >= p.nb)
+			continue;
+		acc[n] += sc[csel][ix * 4 + (lane + 1) % 4] * float(i + 1);
+	}
+	d[tid * 2] = acc[0];
+	d[tid * 2 + 1] = acc[1];
+}

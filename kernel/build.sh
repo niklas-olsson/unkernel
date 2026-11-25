@@ -411,8 +411,10 @@ lower_kernel() {
 	# -g keeps the name section (function names in traps and stack dumps).
 	# In current Binaryen --table64-lowering is an alias of --memory64-lowering
 	# (which lowers both); giving both is harmless (identical output) and also
-	# covers releases where they were separate passes.
-	"$wasm_opt" "$k/vmlinux" -g --memory64-lowering --table64-lowering -o "$k/vmlinux32.wasm.tmp"
+	# covers releases where they were separate passes. -O2 then optimizes
+	# the lowered module (about 4% smaller and as much faster on shell
+	# commands; -O3 was no faster).
+	"$wasm_opt" "$k/vmlinux" -g --memory64-lowering --table64-lowering -O2 -o "$k/vmlinux32.wasm.tmp"
 	mv "$k/vmlinux32.wasm.tmp" "$k/vmlinux32.wasm"
 	echo "kernel (32-bit memory): $k/vmlinux32.wasm ($("$wasm_opt" --version))"
 }

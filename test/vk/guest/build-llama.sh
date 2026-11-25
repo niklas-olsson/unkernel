@@ -12,10 +12,13 @@
 #   node test/vk/unkernel-check.mjs --source --skip a,c --tests vendor/build/vk/llama/guest-test
 #
 # `native` builds for this host instead ($build/vk/llama/native-build) for
-# runs through test/vk/relay.mjs. Needs cmake, ninja, glslc, the Vulkan and
-# SPIR-V headers on this host; downloads llama.cpp (shallow, into
-# $build/vk/llamacpp unless present) and the stories260K model (into
-# $build/vk/model-dl).
+# runs through test/vk/relay.mjs (with this host's Vulkan loader and
+# headers). Needs cmake and ninja. glslc is $GLSLC (a path or a name on
+# PATH), else the pinned one, which vk/glslc.sh builds on first use (python3
+# and a C++ compiler); the SPIR-V headers come from vk/glslc.sh and the
+# cross build's Vulkan headers from vk/pins.sh. Downloads llama.cpp
+# (shallow, into $build/vk/llamacpp unless present) and the stories260K
+# model (into $build/vk/model-dl).
 set -eu
 . "$(cd "$(dirname "$0")/../../.." && pwd)/kernel/tools/env.sh"
 need_zig
@@ -28,6 +31,20 @@ mkdir -p "$out" "$models"
 	curl -fL -o "$models/stories260K.gguf" https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
 common=(-G Ninja -S "$src" -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF
 	-DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=ON)
+# glslc runs on this host in both builds (ggml's shaders and its
+# GGML_VULKAN_*_GLSLC_SUPPORT probes)
+if [ -n "${GLSLC:-}" ]; then
+	glslc="$(command -v "$GLSLC")" || { echo "build-llama.sh: GLSLC=$GLSLC not found" >&2; exit 1; }
+	glslc_dir="$("$root/vk/glslc.sh" headers)"
+else
+	glslc_dir="$("$root/vk/glslc.sh")" || {
+		echo "build-llama.sh: building the pinned glslc failed (vk/glslc.sh; needs cmake, ninja, python3, a C++ compiler);" \
+			"set GLSLC=/path/to/glslc to use another" >&2
+		exit 1
+	}
+	glslc="$glslc_dir/bin/glslc"
+fi
+common+=(-DVulkan_GLSLC_EXECUTABLE="$glslc" -DSPIRV-Headers_DIR="$glslc_dir/share/cmake/SPIRV-Headers")
 if [ "${1:-}" = native ]; then
 	cmake "${common[@]}" -B "$out/native-build"
 	ninja -C "$out/native-build" llama-simple test-backend-ops
@@ -35,9 +52,9 @@ if [ "${1:-}" = native ]; then
 fi
 x="$out/cross"
 mkdir -p "$x/inc" "$x/stub"
-cp -r /usr/include/vulkan "$x/inc/"
-[ -d /usr/include/vk_video ] && cp -r /usr/include/vk_video "$x/inc/"
-grep -ho "VKAPI_CALL vk[A-Za-z0-9]*" /usr/include/vulkan/vulkan_core.h | awk '{ print "void " $2 "(void) {}" }' | sort -u >"$x/stub/vulkan.c"
+. "$root/vk/headers.sh"
+vk_headers "$x/inc"
+grep -ho "VKAPI_CALL vk[A-Za-z0-9]*" "$x/inc/vulkan/vulkan_core.h" | awk '{ print "void " $2 "(void) {}" }' | sort -u >"$x/stub/vulkan.c"
 "$zig" cc -target aarch64-linux-gnu.2.36 -shared -nostdlib -Wl,-soname,libvulkan.so.1 -o "$x/stub/libvulkan.so.1" "$x/stub/vulkan.c"
 ln -sf libvulkan.so.1 "$x/stub/libvulkan.so"
 printf '#!/bin/sh\nexec %s cc -target aarch64-linux-gnu.2.36 -mcpu=generic "$@"\n' "$zig" >"$x/cc.sh"
@@ -60,7 +77,7 @@ EOF
 chmod +x "$x/cc.sh" "$x/cxx.sh"
 cmake "${common[@]}" -B "$x/build" -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
 	-DCMAKE_C_COMPILER="$x/cc.sh" -DCMAKE_CXX_COMPILER="$x/cxx.sh" -DGGML_OPENMP=OFF -DBUILD_SHARED_LIBS=OFF \
-	-DVulkan_INCLUDE_DIR="$x/inc" -DVulkan_LIBRARY="$x/stub/libvulkan.so" -DVulkan_GLSLC_EXECUTABLE="$(command -v glslc)" \
+	-DVulkan_INCLUDE_DIR="$x/inc" -DVulkan_LIBRARY="$x/stub/libvulkan.so" \
 	-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
 ninja -C "$x/build" llama-simple
 llvm-strip -o "$x/llama-simple" "$x/build/bin/llama-simple"

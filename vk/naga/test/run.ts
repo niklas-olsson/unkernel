@@ -185,6 +185,159 @@ const pushpack = (() => {
 	return { push: [...u], want };
 })();
 
+// A barrier, then a continue on an index that depends on the invocation,
+// in a loop whose own condition is uniform (llama.cpp's
+// mul_mat_vec_q2_k/q3_k/q6_k): the rest of the body moves into an else
+// branch and the fall-through continues go (flow.rs), so WGSL takes the
+// barrier as uniform; dispatched below (plain and spirv-opt -O SPIR-V) and
+// every output compared. barrierneg.comp: shapes the pass must leave
+// alone, which WebGPU must still refuse.
+const brc = run("barriercont.comp", "barriercont.comp.spv", { stage: "compute", entryPoint: "main", pushGroup: 1 });
+check("barriercont.comp: no continue left in the barrier loops", !!brc && !/continue;/.test(brc.wgsl));
+const barrierRun = (() => {
+	const nb = 10, rows = 2;
+	const a = Array.from({ length: rows * nb * 4 }, (_, k) => (k % 7) - 3);
+	const want: number[] = [];
+	for (let tid = 0; tid < 16; tid++) {
+		const ix = tid >> 2, lane = tid & 3, acc = [0, 0];
+		for (let i = ix; i < nb; i += 4) for (let n = 0; n < rows; n++) acc[n] += a[(n * nb + i) * 4 + ((lane + 1) & 3)] * (i + 1);
+		want.push(acc[0], acc[1]);
+	}
+	return { a, push: [nb, rows], want };
+})();
+const neg: Record<string, VkShaderResult> = {};
+for (const f of ["barrierneg.comp.spv", "barrierneg.comp.opt.spv"]) {
+	for (const shape of [0, 1]) {
+		try {
+			neg[`${f} SHAPE=${shape}`] = t.translate(readFileSync(new URL(f, here)), { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: shape } });
+		} catch (e) {
+			check(`${f} SHAPE=${shape} translates`, false, (e as Error).message);
+		}
+	}
+	check(`${f} SHAPE=0: the continue under an if that more statements follow stays`, /continue;/.test(neg[`${f} SHAPE=0`]?.wgsl ?? ""));
+}
+
+// A 512- and a 1024-wide workgroup reducing through shared memory with
+// barriers on a 256-invocation device (llama.cpp's norm family): run as
+// 2 or 4 virtual invocations per invocation (virt.rs), the workgroup count
+// unchanged (no dispatchScale). Dispatched below (plain and spirv-opt -O
+// SPIR-V, one workgroup past the rows to take the early return) and every
+// output compared with the same f32 operations in the same order.
+// virtneg.comp: SHAPE 0 (a barrier in another function) and SHAPE 1 (a
+// barrier in a loop whose trip count depends on the invocation) are
+// refused, the latter by the pass's own uniformity check.
+const virtLim = { maxComputeWorkgroupSizeX: 256, maxComputeWorkgroupSizeY: 256, maxComputeWorkgroupSizeZ: 64, maxComputeInvocationsPerWorkgroup: 256 };
+for (const f of ["virt.comp.spv", "virt.comp.opt.spv"]) {
+	for (const bs of [512, 1024]) {
+		const r = run(`${f} BS=${bs}`, f, { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: bs }, limits: virtLim });
+		check(`${f} BS=${bs}: 256-wide workgroup, same workgroup count`, has(r, /@workgroup_size\(256, 1, 1\)/) && !r?.dispatchScale, JSON.stringify(r?.dispatchScale));
+	}
+}
+const virtRun = (() => {
+	const n = 1300, rows = 3;
+	const a = Array.from({ length: rows * n }, (_, k) => Math.fround((((k * 37) % 101) - 50) / 7));
+	const cases = [512, 1024].map((bs) => {
+		const sums: number[] = [], o: number[] = new Array(rows * n).fill(-1), ids: number[] = new Array((rows + 1) * bs).fill(0xffffffff);
+		for (let r = 0; r < rows; r++) {
+			const s = new Float32Array(bs);
+			for (let t = 0; t < bs; t++) {
+				let sum = 0;
+				for (let i = t; i < n; i += bs) sum = Math.fround(sum + a[r * n + i]);
+				s[t] = sum;
+			}
+			for (let k = bs / 2; k > 0; k >>= 1) for (let t = 0; t < k; t++) s[t] = Math.fround(s[t] + s[t + k]);
+			sums.push(s[0]);
+			for (let t = 0; t < bs; t++) ids[r * bs + t] = t * 4 + 3;
+			for (let i = 0; i < n; i++) if (i % 3 !== 1) o[r * n + i] = Math.fround(Math.fround(a[r * n + i] * 2) + s[0]);
+		}
+		return { bs, sums, counts: new Array(rows).fill(bs), ids, o };
+	});
+	return { n, rows, a, cases };
+})();
+try {
+	t.translate(readFileSync(new URL("virtneg.comp.spv", here)), { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: 0 }, limits: virtLim });
+	check("virtneg.comp SHAPE=0: barrier in another function refused", false);
+} catch (e) {
+	check("virtneg.comp SHAPE=0: barrier in another function refused", /cannot split.*virtual invocations: a barrier in a function other than the entry point/.test((e as Error).message), (e as Error).message);
+}
+run("virtneg.comp.opt.spv SHAPE=0 (inlined)", "virtneg.comp.opt.spv", { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: 0 }, limits: virtLim });
+for (const f of ["virtneg.comp.spv", "virtneg.comp.opt.spv"]) {
+	try {
+		t.translate(readFileSync(new URL(f, here)), { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: 1 }, limits: virtLim });
+		check(`${f} SHAPE=1: barrier loop on the invocation refused`, false);
+	} catch (e) {
+		check(`${f} SHAPE=1: barrier loop on the invocation refused`, /cannot split.*virtual invocations: a (condition|break or continue) around (a barrier|barriers) that may differ between invocations/.test((e as Error).message), (e as Error).message);
+	}
+}
+
+// A helper's barrier loop over gl_WorkGroupID.y in steps of
+// gl_NumWorkGroups.y, read through spv-in's private copies (llama.cpp's
+// unoptimized bf16 rms_norm): builtins.rs passes them as arguments, so
+// WGSL takes the loop as uniform. Dispatched below (2x2 workgroups, plain
+// and spirv-opt -O SPIR-V) and every output compared. builtinneg.comp: the
+// loop on gl_LocalInvocationID stays, and WebGPU must refuse it.
+const bl = run("builtinloop.comp", "builtinloop.comp.spv", { stage: "compute", entryPoint: "main", pushGroup: 1 });
+check("builtinloop.comp: the helper takes workgroup_id and num_workgroups as arguments", has(bl, /gl_WorkGroupID_arg: vec3<u32>/) && has(bl, /gl_NumWorkGroups_arg: vec3<u32>/));
+const builtinRun = (() => {
+	const nch = 5, iters = 7, want: number[] = new Array(2 * nch * 64).fill(-1);
+	for (let x = 0; x < 2; x++) for (let y = 0; y < 2; y++) for (let c = y; c < nch; c += 2) for (let tid = 0; tid < 64; tid++) want[(x * nch + c) * 64 + tid] = c * 64 + 63 - tid + x * 1000 + iters;
+	return { push: [nch, iters], want };
+})();
+for (const f of ["builtinneg.comp.spv", "builtinneg.comp.opt.spv"]) {
+	try {
+		const r = t.translate(readFileSync(new URL(f, here)), { stage: "compute", entryPoint: "main", pushGroup: 1 });
+		check(`${f}: local_invocation_id not passed down`, !/gl_LocalInvocationID_arg/.test(r.wgsl));
+		neg[`${f} (local_invocation_id loop)`] = r;
+	} catch (e) {
+		check(`${f} translates`, false, (e as Error).message);
+	}
+}
+
+// Subgroup builtins without subgroup operations (llama.cpp's
+// gated_delta_net): with opts subgroupSize S they become arithmetic on the
+// local index (subgroup.rs), no `subgroups` feature needed. Dispatched
+// below (plain and spirv-opt -O SPIR-V) for WG 64 and S 32 or 16, WG 48
+// (a partial last subgroup) and WG 512 on a 256-invocation device
+// (virtual invocations, virt.rs), and every output compared with what
+// subgroups of exactly S invocations in local index order give.
+// subgroupneg: a subgroup operation keeps WebGPU's subgroups.
+const sgCases = [{ wg: 64, sg: 32 }, { wg: 48, sg: 32 }, { wg: 64, sg: 16 }, { wg: 512, sg: 32, limits: virtLim }];
+const subgroupRun = sgCases.map(({ wg, sg }) => {
+	const groups = 3, n = groups * wg, lanes = 8;
+	const a = Array.from({ length: n }, (_, k) => Math.fround((((k * 29) % 53) - 26) / 5));
+	const o: number[] = [], info: number[] = [];
+	for (let g = 0; g < groups; g++) {
+		let temp = Array.from({ length: wg }, (_, li) => Math.fround(a[g * wg + li] * ((li % sg) + 1)));
+		for (let s = lanes / 2; s > 0; s >>= 1) temp = temp.map((v, li) => Math.fround(v + temp[li ^ s]));
+		for (let li = 0; li < wg; li++) {
+			o.push(temp[li]);
+			info.push(sg, li % sg, Math.floor(li / sg), Math.ceil(wg / sg));
+		}
+	}
+	return { name: `WG=${wg} S=${sg}`, wg, groups, a, o, info };
+});
+for (const f of ["subgroup.v13.comp.spv", "subgroup.v13.comp.opt.spv"]) {
+	for (const c of sgCases) {
+		const r = run(`${f} WG=${c.wg} S=${c.sg}`, f, { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: c.wg, 1: 8 }, subgroupSize: c.sg, limits: c.limits });
+		const virt = c.wg > 256 ? has(r, /@workgroup_size\(256, 1, 1\)/) && !r?.dispatchScale : has(r, new RegExp(`@workgroup_size\\(${c.wg}, 1, 1\\)`));
+		check(`${f} WG=${c.wg} S=${c.sg}: builtins lowered, nothing required${c.wg > 256 ? ", virtual invocations" : ""}`, !!r && !/subgroup/.test(r.wgsl) && r.requires?.length === 0 && virt, JSON.stringify(r?.requires));
+	}
+	try {
+		const r = t.translate(readFileSync(new URL(f, here)), { stage: "compute", entryPoint: "main", pushGroup: 1, spec: { 0: 64, 1: 8 } });
+		check(`${f} without subgroupSize: WebGPU's subgroups as before`, /@builtin\(subgroup_invocation_id\)/.test(r.wgsl) && JSON.stringify(r.requires) === JSON.stringify(["subgroups"]), JSON.stringify(r.requires));
+	} catch (e) {
+		check(`${f} without subgroupSize translates`, false, (e as Error).message);
+	}
+}
+for (const f of ["subgroupneg.v13.comp.spv", "subgroupneg.v13.comp.opt.spv"]) {
+	try {
+		const r = t.translate(readFileSync(new URL(f, here)), { stage: "compute", entryPoint: "main", pushGroup: 1, subgroupSize: 32 });
+		check(`${f}: a subgroup operation keeps WebGPU's subgroups`, /subgroupAdd\(/.test(r.wgsl) && /@builtin\(subgroup_invocation_id\)/.test(r.wgsl) && JSON.stringify(r.requires) === JSON.stringify(["subgroups"]), JSON.stringify(r.requires));
+	} catch (e) {
+		check(`${f} translates`, false, (e as Error).message);
+	}
+}
+
 // Division by a constant zero in a branch dead for the specialization
 // (llama.cpp's mul_mm with TK = 1): allowed by Vulkan, refused by naga and
 // Tint, so no zero divisor may reach the WGSL (compiled below).
@@ -205,16 +358,18 @@ if (smf) delete out["small.comp.f16"]; // SwiftShader has no shader-f16
 	check("wide.comp: 512-wide workgroup shrunk to 256, dispatchScale [2,1,1]", has(wd, /@workgroup_size\(256, 1, 1\)/) && JSON.stringify(wd?.dispatchScale) === "[2,1,1]", JSON.stringify(wd?.dispatchScale));
 	const wb = run("widebi.comp", "widebi.comp.spv", { stage: "compute", entryPoint: "main", limits: lim });
 	check("widebi.comp: local/workgroup ids, local index, workgroup count derived from the global id", has(wb, /let gl_LocalInvocationID = gl_GlobalInvocationID % vec3<u32>\(512u, 1u, 1u\);/) && has(wb, /kwvk_nwg \/ vec3<u32>\(2u, 1u, 1u\)/) && JSON.stringify(wb?.dispatchScale) === "[2,1,1]");
+	const sw = run("specwg.comp 512", "specwg.comp.spv", { stage: "compute", entryPoint: "main", spec: { 0: 512, 1: 8 }, limits: lim });
+	check("workgroup memory + 512 wide: virtual invocations, no dispatchScale", has(sw, /@workgroup_size\(256, 1, 1\)/) && !sw?.dispatchScale, JSON.stringify(sw?.dispatchScale));
 	try {
-		t.translate(readFileSync(new URL("specwg.comp.spv", here)), { stage: "compute", entryPoint: "main", spec: { 0: 512, 1: 8 }, limits: lim });
-		check("workgroup memory + too wide: clear error", false);
+		t.translate(readFileSync(new URL("specwg.comp.spv", here)), { stage: "compute", entryPoint: "main", spec: { 0: 4096, 1: 8 }, limits: lim });
+		check("workgroup memory + too wide for 8 virtual invocations: clear error", false);
 	} catch (e) {
-		check("workgroup memory + too wide: clear error", /exceeds the device.s limits.*cannot split/.test((e as Error).message), (e as Error).message);
+		check("workgroup memory + too wide for 8 virtual invocations: clear error", /exceeds the device.s limits.*cannot split.*virtual invocations: no power of two/.test((e as Error).message), (e as Error).message);
 	}
 }
 
 // Every shader again as spirv-opt -O output: translates and (below) compiles.
-for (const f of readdirSync(here).filter((f) => f.endsWith(".opt.spv"))) {
+for (const f of readdirSync(here).filter((f) => f.endsWith(".opt.spv") && !f.startsWith("barrierneg") && !f.startsWith("builtinneg") && !f.startsWith("subgroup"))) {
 	const stage = f.includes(".vert.") ? "vertex" : f.includes(".frag.") ? "fragment" : "compute";
 	const spec: Record<number, number> = f.startsWith("specwg") ? { 0: 64, 1: 8 } : f.startsWith("fastdiv") ? { 0: 128 } : {};
 	const arrays = f.startsWith("gtkish") ? { "0.0": { base: 0, count: 3 } } : arraysAll;
@@ -273,11 +428,17 @@ const pipelines: [string, string, string | undefined][] = [
 	["fastdiv", "fastdiv.comp", undefined],
 	["small", "small.comp", undefined],
 	["zerodiv", "zerodiv.comp", undefined],
+	["barriercont", "barriercont.comp", undefined],
 ];
 const page = `<!doctype html><meta charset="utf-8"><title>vk-shader</title><script type="module">
 const out = ${JSON.stringify(out)};
 const pipelines = ${JSON.stringify(pipelines)};
 const pushpack = ${JSON.stringify(pushpack)};
+const barrierRun = ${JSON.stringify(barrierRun)};
+const virtRun = ${JSON.stringify(virtRun)};
+const builtinRun = ${JSON.stringify(builtinRun)};
+const subgroupRun = ${JSON.stringify(subgroupRun)};
+const neg = ${JSON.stringify(neg)};
 const res = [];
 function layout(device, results, pushGroup) {
 	const groups = [];
@@ -368,6 +529,172 @@ try {
 		const got = [...new Float32Array(rb.getMappedRange())];
 		const bad = pushpack.want.map((w, i) => (got[i] === w ? "" : "o[" + i + "] " + got[i] + " != " + w)).filter(Boolean);
 		res.push({ name: "WebGPU run " + name + ": every value at its Vulkan offset", ok: !bad.length, detail: bad.slice(0, 6).join(", ") });
+	}
+	// Run the barrier loop with the continue (flow.rs) and compare every output.
+	for (const [name, pushGroup] of [["barriercont.comp", 1], ["barriercont.comp.opt.spv", 2]]) {
+		const r = out[name];
+		if (!r) continue;
+		const U = GPUBufferUsage;
+		const a = device.createBuffer({ size: 1024, usage: U.STORAGE | U.COPY_DST });
+		const d = device.createBuffer({ size: 1024, usage: U.STORAGE | U.COPY_SRC });
+		const pc = device.createBuffer({ size: 256, usage: U.UNIFORM | U.COPY_DST });
+		const rb = device.createBuffer({ size: 1024, usage: U.MAP_READ | U.COPY_DST });
+		device.queue.writeBuffer(a, 0, new Float32Array(barrierRun.a));
+		device.queue.writeBuffer(pc, 0, new Uint32Array(barrierRun.push));
+		const bgls = [], groups = [];
+		for (let g = 0; g <= pushGroup; g++) {
+			const bs = g === pushGroup ? [{ wgslBinding: 0, kind: "uniform", buf: pc }] : r.bindings.filter((b) => b.group === g).map((b) => ({ ...b, buf: b.binding === 0 ? a : d }));
+			const l = device.createBindGroupLayout({ entries: bs.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+			bgls.push(l);
+			groups.push(device.createBindGroup({ layout: l, entries: bs.map((b) => ({ binding: b.wgslBinding, resource: { buffer: b.buf } })) }));
+		}
+		device.pushErrorScope("validation");
+		const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: bgls }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+		const enc = device.createCommandEncoder();
+		const pass = enc.beginComputePass();
+		pass.setPipeline(pl);
+		groups.forEach((bg, g) => pass.setBindGroup(g, bg));
+		pass.dispatchWorkgroups(1);
+		pass.end();
+		enc.copyBufferToBuffer(d, 0, rb, 0, 1024);
+		device.queue.submit([enc.finish()]);
+		const err = await device.popErrorScope();
+		await rb.mapAsync(GPUMapMode.READ);
+		const got = [...new Float32Array(rb.getMappedRange())];
+		const bad = barrierRun.want.map((w, i) => (got[i] === w ? "" : "d[" + i + "] " + got[i] + " != " + w)).filter(Boolean);
+		res.push({ name: "WebGPU run " + name + ": every sum of the barrier loop with the continue", ok: !err && !bad.length, detail: (err ? err.message + " " : "") + bad.slice(0, 6).join(", ") });
+	}
+	// Run the helper's builtin loop (builtins.rs) and compare every output.
+	for (const name of ["builtinloop.comp", "builtinloop.comp.opt.spv"]) {
+		const r = out[name];
+		if (!r) continue;
+		const pushGroup = name === "builtinloop.comp" ? 1 : 2;
+		const U = GPUBufferUsage;
+		const d = device.createBuffer({ size: builtinRun.want.length * 4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
+		device.queue.writeBuffer(d, 0, new Float32Array(builtinRun.want.length).fill(-1));
+		const pc = device.createBuffer({ size: 256, usage: U.UNIFORM | U.COPY_DST });
+		device.queue.writeBuffer(pc, 0, new Uint32Array(builtinRun.push));
+		const rb = device.createBuffer({ size: d.size, usage: U.MAP_READ | U.COPY_DST });
+		const bgls = [], groups = [];
+		for (let g = 0; g <= pushGroup; g++) {
+			const bs = g === pushGroup ? [{ wgslBinding: 0, kind: "uniform", buf: pc }] : r.bindings.filter((b) => b.group === g).map((b) => ({ ...b, buf: d }));
+			const l = device.createBindGroupLayout({ entries: bs.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+			bgls.push(l);
+			groups.push(device.createBindGroup({ layout: l, entries: bs.map((b) => ({ binding: b.wgslBinding, resource: { buffer: b.buf } })) }));
+		}
+		device.pushErrorScope("validation");
+		const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: bgls }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+		const enc = device.createCommandEncoder();
+		const pass = enc.beginComputePass();
+		pass.setPipeline(pl);
+		groups.forEach((bg, g) => pass.setBindGroup(g, bg));
+		pass.dispatchWorkgroups(2, 2);
+		pass.end();
+		enc.copyBufferToBuffer(d, 0, rb, 0, d.size);
+		device.queue.submit([enc.finish()]);
+		const err = await device.popErrorScope();
+		await rb.mapAsync(GPUMapMode.READ);
+		const got = [...new Float32Array(rb.getMappedRange())];
+		const bad = builtinRun.want.map((w, i) => (got[i] === w ? "" : "d[" + i + "] " + got[i] + " != " + w)).filter(Boolean);
+		res.push({ name: "WebGPU run " + name + ": every output of the helper's builtin loop", ok: !err && !bad.length, detail: (err ? err.message + " " : "") + bad.slice(0, 6).join(", ") });
+	}
+	// Run the virtual invocations (virt.rs) and compare every output.
+	for (const f of ["virt.comp.spv", "virt.comp.opt.spv"]) {
+		for (const c of virtRun.cases) {
+			const name = f + " BS=" + c.bs;
+			const r = out[name];
+			if (!r) continue;
+			const U = GPUBufferUsage;
+			const bufs = [
+				[virtRun.a.length, new Float32Array(virtRun.a)],
+				[c.o.length, new Float32Array(c.o.length).fill(-1)],
+				[c.ids.length, new Uint32Array(c.ids.length).fill(0xffffffff)],
+				[virtRun.rows, new Float32Array(virtRun.rows)],
+				[virtRun.rows, new Uint32Array(virtRun.rows)],
+			].map(([n, init]) => {
+				const b = device.createBuffer({ size: Math.max(256, n * 4), usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
+				device.queue.writeBuffer(b, 0, init);
+				return b;
+			});
+			const pc = device.createBuffer({ size: 256, usage: U.UNIFORM | U.COPY_DST });
+			device.queue.writeBuffer(pc, 0, new Uint32Array([virtRun.n, virtRun.rows]));
+			const bgls = [], groups = [];
+			for (let g = 0; g <= 1; g++) {
+				const bs = g === 1 ? [{ wgslBinding: 0, kind: "uniform", buf: pc }] : r.bindings.filter((b) => b.group === 0).map((b) => ({ ...b, buf: bufs[b.binding] }));
+				const l = device.createBindGroupLayout({ entries: bs.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+				bgls.push(l);
+				groups.push(device.createBindGroup({ layout: l, entries: bs.map((b) => ({ binding: b.wgslBinding, resource: { buffer: b.buf } })) }));
+			}
+			device.pushErrorScope("validation");
+			const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: bgls }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+			const enc = device.createCommandEncoder();
+			const pass = enc.beginComputePass();
+			pass.setPipeline(pl);
+			groups.forEach((bg, g) => pass.setBindGroup(g, bg));
+			pass.dispatchWorkgroups(virtRun.rows + 1);
+			pass.end();
+			const rbs = bufs.slice(1).map((b) => {
+				const rb = device.createBuffer({ size: b.size, usage: U.MAP_READ | U.COPY_DST });
+				enc.copyBufferToBuffer(b, 0, rb, 0, b.size);
+				return rb;
+			});
+			device.queue.submit([enc.finish()]);
+			const err = await device.popErrorScope();
+			const got = [];
+			for (const [i, rb] of rbs.entries()) {
+				await rb.mapAsync(GPUMapMode.READ);
+				got.push(i === 1 || i === 3 ? [...new Uint32Array(rb.getMappedRange())] : [...new Float32Array(rb.getMappedRange())]);
+			}
+			const bad = [];
+			for (const [k, want, g] of [["o", c.o, got[0]], ["ids", c.ids, got[1]], ["sums", c.sums, got[2]], ["counts", c.counts, got[3]]])
+				for (let i = 0; i < want.length && bad.length < 6; i++) if (g[i] !== want[i]) bad.push(k + "[" + i + "] " + g[i] + " != " + want[i]);
+			res.push({ name: "WebGPU run " + name + ": every output of the virtual invocations", ok: !err && !bad.length, detail: (err ? err.message + " " : "") + bad.join(", ") });
+		}
+	}
+	// Run the lowered subgroup builtins (subgroup.rs) and compare every output.
+	for (const f of ["subgroup.v13.comp.spv", "subgroup.v13.comp.opt.spv"]) {
+		for (const c of subgroupRun) {
+			const name = f + " " + c.name;
+			const r = out[name];
+			if (!r) continue;
+			const U = GPUBufferUsage;
+			const bufs = [new Float32Array(c.a), new Float32Array(c.o.length).fill(-1), new Uint32Array(c.info.length).fill(0xffffffff)].map((init) => {
+				const b = device.createBuffer({ size: init.byteLength, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
+				device.queue.writeBuffer(b, 0, init);
+				return b;
+			});
+			const bs = r.bindings.filter((b) => b.group === 0);
+			const l = device.createBindGroupLayout({ entries: bs.map((b) => ({ binding: b.wgslBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: b.kind } })) });
+			const bg = device.createBindGroup({ layout: l, entries: bs.map((b) => ({ binding: b.wgslBinding, resource: { buffer: bufs[b.binding] } })) });
+			device.pushErrorScope("validation");
+			const pl = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module: mods[name], entryPoint: r.entryPoint } });
+			const enc = device.createCommandEncoder();
+			const pass = enc.beginComputePass();
+			pass.setPipeline(pl);
+			pass.setBindGroup(0, bg);
+			pass.dispatchWorkgroups(c.groups);
+			pass.end();
+			const rbs = bufs.slice(1).map((b) => {
+				const rb = device.createBuffer({ size: b.size, usage: U.MAP_READ | U.COPY_DST });
+				enc.copyBufferToBuffer(b, 0, rb, 0, b.size);
+				return rb;
+			});
+			device.queue.submit([enc.finish()]);
+			const err = await device.popErrorScope();
+			await rbs[0].mapAsync(GPUMapMode.READ);
+			await rbs[1].mapAsync(GPUMapMode.READ);
+			const got = [[...new Float32Array(rbs[0].getMappedRange())], [...new Uint32Array(rbs[1].getMappedRange())]];
+			const bad = [];
+			for (const [k, want, g] of [["o", c.o, got[0]], ["info", c.info, got[1]]])
+				for (let i = 0; i < want.length && bad.length < 6; i++) if (g[i] !== want[i]) bad.push(k + "[" + i + "] " + g[i] + " != " + want[i]);
+			res.push({ name: "WebGPU run " + name + ": every output of the lowered subgroup builtins", ok: !err && !bad.length, detail: (err ? err.message + " " : "") + bad.join(", ") });
+		}
+	}
+	// Shapes flow.rs and virt.rs leave alone: WebGPU refuses them for uniformity.
+	for (const [name, r] of Object.entries(neg)) {
+		const info = await device.createShaderModule({ code: r.wgsl }).getCompilationInfo();
+		const msgs = info.messages.filter((x) => x.type === "error").map((x) => x.message);
+		res.push({ name: "WebGPU refuses " + name + " (uniformity)", ok: msgs.some((m) => /uniform control flow/.test(m)), detail: msgs.join("; ") || "compiled" });
 	}
 	res.push({ name: "WebGPU adapter " + (adapter.info?.description || adapter.info?.vendor || "?"), ok: true });
 } catch (e) {

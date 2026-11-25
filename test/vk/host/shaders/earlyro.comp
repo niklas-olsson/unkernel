@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+#version 450
+// An early return on a read-only buffer's value before a barrier, as
+// ggml's matmul_id (`if (tile_idx >= data_row_map[0]) return;`): uniform
+// for WGSL only while that buffer stays read-only, so the host keeps the
+// shader's read-only buffers (and copies them aside where the dispatch
+// binds the same buffer writable).
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer C { uint n; } c;
+layout(set = 0, binding = 1) readonly buffer A { uint v[]; } a;
+layout(set = 0, binding = 2) writeonly buffer D { uint v[]; } d;
+shared uint s[64];
+void main() {
+	if (gl_WorkGroupID.x >= c.n) return;
+	uint i = gl_LocalInvocationID.x;
+	uint g = gl_WorkGroupID.x * 64u + i;
+	s[i] = a.v[g];
+	barrier();
+	d.v[g] = s[63u - i] + 1u;
+}

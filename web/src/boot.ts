@@ -26,7 +26,6 @@ import { glBundleSha256 } from "virtual:unkernel-kernel";
 import "@wterm/dom/src/terminal.css";
 import { WTerm } from "@wterm/dom";
 import { prefetchApkIndexes } from "./apk.ts";
-import { createAudioOut } from "./audio.ts";
 import { autoHide } from "./autohide.ts";
 import { AUTO_SUSPEND_HOLD_MS, AutoSuspend, AutoSuspendSkip, LEAVE_OFFER_MS, LEAVE_STAYED_MS, Pause, SuspendSaveError, allowLeave, autoSuspendLabel, pageLeaving, quietStart, resumeAskedFor, resumeChoice, resumedNote, sessionRoom, wantLeavePrompt, type SuspendFacts } from "./autosuspend.ts";
 import { CPUS_ONCE_KEY, FORK_REPO, GL_DISTROS, INLINE_ONCE_KEY, PAGE_COMMIT, PAGE_COMMIT_URL, REPO, UP_ONCE_KEY, dataSizeCap, vkAdapterBlocker } from "./config.ts";
@@ -48,7 +47,7 @@ import { clearResumeRequest, setResumeRequest, takeResumeRequest } from "./ui.ts
 import { createTerminals, pasteText, setTermFont, termText, TERM_OPTIONS } from "./wterms.ts";
 import { attachWayland, waylandApi } from "./wayland.ts";
 import {
-	BootError, ConsoleRouter, KernelInstance, SnapshotCommitError, WorkerKernel, bundledBoot, createKernel, loadKernelModule, openDistroDisk, serveWasiPrograms, snapshotDiskMismatch,
+	BootError, ConsoleRouter, KernelInstance, SnapshotCommitError, WorkerKernel, bundledBoot, createAudioOut, createKernel, loadKernelModule, openDistroDisk, serveWasiPrograms, snapshotDiskMismatch,
 	type BlockDevice, type DistroDisk, type BootProgress, type DiskSpec, type DiskState, type DownloadProgress, type Kernel, type KernelHandle, type KernelSnapshot, type SnapshotHoldDecision,
 	type GlStats, type VirglTotals,
 } from "./sdk.ts";
@@ -1660,7 +1659,7 @@ export function start(): void {
 			consoleSize: { cols: term.cols, rows: term.rows },
 			onOutput: consoleWrite, log, onProgress,
 			display: cfg.display ? display.size : false, onDisplay: display.onDisplay, onInput: display.onInput,
-			sound: cfg.sound ? createAudioOut({ log }) : false, // Web Audio, ?sound=0 (audio.ts)
+			sound: cfg.sound ? createAudioOut({ log }) : false, // Web Audio (js/web/audio.ts), ?sound=0
 			vsock: true, // the terminals (wterms.ts: kwtty sessions)
 		};
 		// Guest GL on this thread's WebGL2 (Debian, on by default; showGl()), read when the kernel is

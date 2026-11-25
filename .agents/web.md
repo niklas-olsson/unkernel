@@ -38,12 +38,11 @@ their top):
   data disk), `session.ts` (the suspended session), `autosuspend.ts`
   (suspending in the background and the question on leaving: when,
   decided without a DOM), `display.ts` (the guest display's window, the
-  mode offered, keyboard routing), `audio.ts` (Web Audio output),
-  `stats.ts` (the resource sampler), `preview.ts` and `preview-ws.ts` (the
-  guest preview's page side), `open.ts` (the guest's `open` and
-  `xdg-open`, host commands: a URL on the guest's own address in the
-  preview, any other http(s) URL in a new tab, each only after the user
-  confirms), `wayland.ts` and `wayland/` (the guest's Wayland apps: wland
+  mode offered, keyboard routing), `stats.ts` (the resource sampler),
+  `preview.ts` and `preview-ws.ts` (the guest preview's page side),
+  `open.ts` (the guest's `open` and `xdg-open`, host commands: a URL on the
+  guest's own address in the preview, any other http(s) URL in a new tab,
+  each only after the user confirms), `wayland.ts` and `wayland/` (the guest's Wayland apps: wland
   on vsock and kwshm), `sw.ts` (the service worker's registration and the
   update check), `profile.ts` (`/profile.html`).
 - The desktop: `wm.ts` (the window manager), `wmsnap.ts` (the tiles'
@@ -314,8 +313,8 @@ deploying the page needs no kernel toolchain.
   `open` while their window shows), the options' `#opt-*`, `#confirm`,
   `#keys`, `#fb-layer`, `#wl-desktop`. Keep them working.
 - Safe areas are the CSS variables `--st`, `--sr`, `--sb`, `--sl` (style.css). On iOS,
-  `--sb` is three quarters of the bottom inset: the Dock sits that far above the bottom
-  edge, over the wallpaper that goes on under the home indicator, and moves its ends in
+  `--sb` is three quarters of the bottom inset: the Dock's tiles sit that far above the
+  bottom edge, its bar going on under the home indicator, and its ends move in
   by `--sc` (half the bottom inset) for the round corners. While the on-screen keyboard
   is up (`App.tsx` sets `kb` on the root when the visual viewport is well below the
   layout viewport) both are 0 and the top bar and the Dock are hidden (the key bar
@@ -424,9 +423,10 @@ deploying the page needs no kernel toolchain.
   no report within 20 s) reloads once on the page's thread
   (`bootUpOnce(..., inline)`, sessionStorage `kw-inline-once`); every
   other way an asked worker can fail ends in `ui.fail`.
-- Sound is an AudioWorklet fed by postMessage, because the kernel calls
-  the import from a busy main thread; scheduled buffers are the fallback
-  where there is no secure context. Checked by hand only.
+- Sound is the SDK's `createAudioOut()` (js.md): an AudioWorklet fed by
+  postMessage, because the kernel calls the import from a busy main thread
+  (inline); scheduled buffers are the fallback where there is no secure
+  context. On the page itself it is checked by hand only.
 - Every response carries COOP/COEP. A secure context is therefore
   cross-origin isolated, which worker mode's shared transport needs (the
   kernel's own memory is not shared). Anything cross-origin that the page
@@ -553,8 +553,12 @@ deploying the page needs no kernel toolchain.
   bar and the Dock, inside the safe areas. Compact mode (phones,
   `KW.config.mobile`, and viewports below 640 px, `COMPACT_PX` in
   Workspace.tsx): every window is drawn maximized with a slim strip for
-  its title, only the top one shows, and the Dock is the switcher; the
-  geometry is kept for when the viewport widens.
+  its title, only the top one shows, and the Dock is the switcher, a lower
+  bar across the page; the geometry is kept for when the viewport widens.
+  Outside it, while a maximized window is shown (`dockHides()` in wm.ts) the
+  Dock hides itself and the workspace goes on to the page's bottom; the
+  pointer at the bottom edge (`#dock-edge`, `useReveal` in Dock.tsx) brings
+  it back over the windows.
 - Snapping (`wmsnap.ts`): a window dragged by its title bar to the
   workspace's sides or corners tiles to a half or a quarter (to the top
   edge: maximized), with a preview under it (SnapPreview.tsx); Ctrl-A and
@@ -613,8 +617,9 @@ deploying the page needs no kernel toolchain.
   mode); a right click, a long press or Shift-F10 opens the tile's menu
   (`winmenu.tsx` `windowItems()`, the same items as the top bar's app
   menu). The tiles scroll sideways when they do not fit.
-- Top bar (`TopBar.tsx`, `#topbar`): no background over the wallpaper, a
-  blurred tint over a window. The current app, one control (its icon, as
+- Top bar (`TopBar.tsx`, `#topbar`): no background over the wallpaper,
+  nearly black while a maximized window is shown (`data-dark`) and in
+  compact mode. The current app, one control (its icon, as
   on its Dock tile, the focused window's `meta` title, then its own title
   in a quieter tone; unkernel's mark and "Desktop" with none), a menu of
   the window's items (`#tb-app`), and in its place until user space prints the
@@ -626,9 +631,7 @@ deploying the page needs no kernel toolchain.
   bar the share of the page's time the two renderers took together, its
   tooltip each one's figures), which open
   Resources, and the Control Center's item (`#tb-status`,
-  `#tb-status-label`). The bar always shows:
-  its auto-hide over a maximized window is off (`auto` in TopBar.tsx; the
-  code for it stays).
+  `#tb-status-label`). The bar always shows.
 - Control Center (`ControlCenter.tsx`, `#tb-cc`), opened by hovering or
   clicking `#tb-status`:
   the state and the uptime, quick buttons for what applies at once (full
@@ -928,8 +931,8 @@ external buffer), else as wl_shm windows (frames read back).
   token limit, the context shifted when full, end-of-text ignored; the
   model has no chat template), `TURNS=1` a story the user continues a
   turn at a time, and a model with a template chats.
-  `MODEL=stories15M|PATH|URL` picks another GGUF; quantized ones abort for
-  now (vk.md, Unsupported), and wider F32 ones on software WebGPU. Only
+  `MODEL=stories15M|PATH|URL` picks another GGUF; quantized ones run too
+  (2026-11-24; mixture-of-experts models abort: vk.md, Unsupported). Only
   llama's errors and timings reach the terminal (the rest is in
   `llama.log`), and a refused shader or a lost device gets a one-line
   hint. Nothing to deploy for it: both downloads come from their
@@ -975,29 +978,47 @@ external buffer), else as wl_shm windows (frames read back).
   weights read and uploaded, the first pipelines made), and `ollama run
   --verbose` ends each reply with Ollama's timings (eval rate: tokens per
   second), the numbers to compare GPUs and builds by. On a terminal ollama.sh asks which model (a numbered list; Enter takes
-  the first, SmolLM2 135M, which is also the default without a terminal;
+  the first, Qwen3 0.6B, which is also the default without a terminal;
   `MODEL=` skips the question); a model with a chat template gets `ollama
   run`'s chat. `THINK=0` runs a thinking model without its reasoning,
   `TEMP=N` serves a derived model with that temperature, a model that does
   not fit the data disk is refused before its download, and the server is
   started again when Ollama's GPU discovery (30 s) times out on a cold
-  start. Short names: `smollm2` (served as `smollm2-tools`: a ChatML
-  template with a tool section), `qwen`, `qwen-coder`, `qwen1.5` (Qwen2.5
-  1.5B, 2950 MiB), `llama3.2` (1B, 2364 MiB), `qwen3.5` (0.8B, BF16),
+  start. The list's models are the registry's quantized tags (2026-11-24;
+  the fp16 ones before quantized types ran on kwvk), by short name:
+  `qwen3` (`qwen3:0.6b`, Q4_K_M, 498 MiB), `qwen3-1.7b` (`qwen3:1.7b`, 1296
+  MiB), `qwen` (`qwen2.5:0.5b`, 379 MiB), `qwen1.5` (`qwen2.5:1.5b`, 940
+  MiB), `qwen-coder` (`qwen2.5-coder:0.5b`, 379 MiB), `qwen3.5`
+  (`qwen3.5:0.8b-q8_0`, 971 MiB with its vision projector; not
+  `qwen3.5:0.8b`, whose MTP draft makes Ollama start llama-server with
+  speculative decoding, whose gated_delta_net replay pipelines kwvk
+  refuses), `llama3.2` (`llama3.2:1b`, Q8_0, 1259 MiB), `smollm2`
+  (`smollm2:135m-instruct-q4_K_M`, 100 MiB, served as
+  `smollm2-tools:q4_K_M`: a ChatML template with a tool section),
   `stories260K`. Models:
-  - `MODEL=stories260K`, the story model, runs on software WebGPU too: the
-    script writes a story from "Once upon a time" and reads the user's
+  - `MODEL=stories260K`, the story model, the fastest on software WebGPU:
+    the script writes a story from "Once upon a time" and reads the user's
     story starts, sending each as `ollama run --verbose stories260k
     "TEXT"` (Ollama's generate path), not through `ollama run`'s own
     prompt, which chats through llama-server's chat endpoint with a
     template this model does not know.
-  - `MODEL=smollm2` (SmolLM2 135M Instruct, F16, 271 MiB) and the default
-    are small coding models for a real GPU. On SwiftShader both abort at
-    rms_norm_mul_f32_512 (512-wide workgroups) with the hint; on the
-    user's GPU SmolLM2 loaded and answered (2026-11-24). Of the two, only
-    Qwen2.5-Coder's template has tools (`ollama show`).
-  - `MODEL=[user/]name[:tag]` takes any model of Ollama's registry.
-  - `MODEL=PATH.gguf` takes another GGUF. Quantized models abort for now.
+  - The chat models run on SwiftShader too, at a token every few seconds
+    or slower. Checked 2026-11-24 with llama.cpp b12651's own Vulkan build
+    (x86-64, natively through `test/vk/relay.mjs` on SwiftShader,
+    `llama-completion -ngl 99 --temp 0`; Ollama's GGUFs): `qwen3:0.6b` and
+    `qwen3.5:0.8b`'s Q8_0 weights with every layer on kwvk, no pipeline
+    refused, 2 graph splits (only the token embeddings' lookup on the
+    CPU); Qwen3 0.6B gave the CPU backend's text for 4 tokens, then a
+    sane text of its own, at 0.08 tokens/s, Qwen3.5 0.8B the CPU backend's
+    for all 11 tokens it made, at about 0.04 (two runs at once). On the host's CPU Ollama reports tools and
+    thinking for Qwen3 and Qwen3.5 (and vision for Qwen3.5), tools for
+    Qwen2.5, neither for SmolLM2's own template (Llama 3.2's template has
+    a tool section). Not yet run
+    through Ollama in the guest; on the user's GPU SmolLM2 F16 loaded and
+    answered (2026-11-24).
+  - `MODEL=[user/]name[:tag]` takes any model of Ollama's registry (an
+    fp16 tag too).
+  - `MODEL=PATH.gguf` takes another GGUF.
 
   `ollama pull` cannot work in the guest. It refuses redirects to hosts
   that resolve to non-public addresses, and the page's network answers DNS
@@ -1050,12 +1071,14 @@ external buffer), else as wl_shm windows (frames read back).
   0 (`TEMP=`) and a thinking model with `reasoning_effort: "none"` in the
   connection's per-model request fields (`THINK=1` for thinking; untested
   in fx). The
-  first and default model is `MODEL=qwen` (Qwen2.5 0.5B Instruct,
-  `qwen2.5:0.5b-instruct-fp16`: the smallest one ollama.sh offers that
-  calls fx's tools; CTX 16384; guest memory 3 GiB or more). Qwen2.5-Coder
-  0.5B (`MODEL=qwen-coder`, the same size) answered fx with JSON in a code
-  block instead of tool calls (3 tasks of 3; Qwen2.5 0.5B called tools in
-  2; host CPU, 2026-11-24). fx sends
+  first and default model is `MODEL=qwen3-1.7b` (Qwen3 1.7B, `qwen3:1.7b`,
+  Q4_K_M, 1296 MiB; CTX 16384, whose KV cache is 1.75 GiB of kwvk's 4 GiB;
+  guest memory 3 GiB or more), then `qwen3` (Qwen3 0.6B, 498 MiB): on the
+  host's CPU (2026-11-24, fx 0.0.17, temperature 0, no thinking) Qwen3 0.6B
+  wrote a requested file with a real `write_file` call (one task tried).
+  As fp16 tags then, Qwen2.5-Coder 0.5B (`MODEL=qwen-coder`) answered fx
+  with JSON in a code block instead of tool calls (3 tasks of 3; Qwen2.5
+  0.5B, `MODEL=qwen`, called tools in 2; host CPU, 2026-11-24). fx sends
   its tools with every request whatever `supports_tool_use` says, and
   Ollama answers HTTP 400 for a model without them (SmolLM2, the story
   model), so fx-local.sh stops before fx with such a model. The
@@ -1063,7 +1086,9 @@ external buffer), else as wl_shm windows (frames read back).
   `/api/show` reports, and tool use follows its capabilities
   (`OLLAMA_MODEL_TOOLS` for the story model; `TOOLS=0|1` overrides). On
   a real GPU (the user's, 2026-11-24) SmolLM2 loaded and fx reached it
-  (and got that 400); Qwen2.5 with fx on a GPU is untried. The field names
+  (and got that 400), and Qwen2.5 0.5B (fp16) answered fx but described or
+  invented tool results more often than it called a tool; Qwen3 with fx on
+  a GPU is untried. The field names
   follow fx's docs for 0.0.17.
 - The page needs a base bundle with the ICD (vk.md). `test/vk/page-check.mjs`:
   the dev server on a free port with `KW_KERNEL=$KW_BUILD/vk/base/unkernel.wasm`

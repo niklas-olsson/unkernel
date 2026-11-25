@@ -273,8 +273,9 @@ export class WorkerKernel implements KernelHandle {
 		}
 		if (opts.vsock) {
 			// Packets for the guest, per burst: through the shared transport's
-			// ring (read at the kernel's next clock read), else one message
-			// (transferred), which the worker takes at the kernel's next yield.
+			// ring (read at the kernel's next clock read; as a message while
+			// the kernel waits idle), else one message (transferred), which
+			// the worker takes at the kernel's next yield.
 			const flush = () => {
 				const packets = this.#vsockOut;
 				this.#vsockOut = [];

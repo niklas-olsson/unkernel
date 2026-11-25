@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // The top bar (#topbar), macOS's menu bar: a thin strip across the top of
 // the page (style.css: --tb-h, over the top safe area), with no background
-// over the wallpaper. The workspace (#workspace, Workspace.tsx) starts below
+// over the wallpaper, nearly black while a maximized window is shown (wm.ts
+// dockHides(): data-dark) and in compact mode. The workspace (#workspace, Workspace.tsx) starts below
 // it (--tb-space). Left to right:
 // - the current app, one control (what macOS's Apple menu has is in the
 //   Control Center): its icon (AppIcon: its Dock tile's icon, wm.ts meta,
@@ -64,7 +65,7 @@ import { toggleSection, useFocusedSection } from "../sysapps.ts";
 import { keyFor, type CommandId } from "../keys.ts";
 import { useStore } from "../store.ts";
 import { windowItems } from "../winmenu.tsx";
-import { useWm, type WmWindow } from "../wm.ts";
+import { dockHides, useWm, type WmWindow } from "../wm.ts";
 import { BootSlot } from "./BootIndicator.tsx";
 import { ControlCenter, ResourcesPopover, type CcClose } from "./ControlCenter.tsx";
 import { GPU_STATE, VK_STATE, vkTrouble, type ResKey } from "./Glance.tsx";
@@ -212,6 +213,7 @@ export function TopBar() {
 	const errors = useStore((s) => s.errors.length);
 	const section = useFocusedSection();
 	const win = useWm((s) => s.windows.find((w) => w.id === s.focused));
+	const dark = useWm(dockHides);
 	const kmem = KW.memActualMiB || KW.config.memMiB;
 	const net = KW.config.net;
 	// Live resources (stats.ts): only a fresh, successful read counts; else the icons are empty.
@@ -305,7 +307,7 @@ export function TopBar() {
 	const used = disk && `${fmtSizeShort(disk.used)} of ${fmtSizeShort(disk.size)}${disk.size > 0 ? ` (${Math.round((disk.used / disk.size) * 100)}%)` : ""}`;
 
 	return (
-		<header id="topbar" ref={bar} aria-label="Menu bar">
+		<header id="topbar" ref={bar} data-dark={dark || undefined} aria-label="Menu bar">
 			<nav aria-label="Menus" className="tb-left">
 				<BootSlot>
 					{win && app ? (

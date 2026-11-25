@@ -2649,7 +2649,12 @@ pub fn string_words_pub(s: &str) -> Vec<u32> {
 // Emitter::finish) when a subgroup operation's value comes from another
 // block (llama.cpp's cumsum, rms_norm_partials, ssm_scan...). A local
 // OpCopyObject of the value right before the operation keeps it in-block.
+// The same for the value of OpAtomicIAdd and the other atomics spv-in
+// reads with one value (it looks that operand up without spilling it, so
+// a value from a loop header used after the loop is out of scope: "Used by
+// a statement before it was introduced", llama.cpp's count_experts).
 pub fn localize_subgroup_operands(words: Vec<u32>) -> Vec<u32> {
+	let atomic_value = |o: u32| o == 229 || (234..=242).contains(&o) || o == 6035;
 	let mut val_ty: HashMap<u32, u32> = HashMap::new();
 	let mut any = false;
 	let mut i = 5;
@@ -2659,7 +2664,7 @@ pub fn localize_subgroup_operands(words: Vec<u32>) -> Vec<u32> {
 		if n >= 3 && !(19..=39).contains(&o) && !matches!(o, 5 | 6 | 71 | 72 | 15 | 16 | 17 | 10 | 11) {
 			val_ty.insert(words[i + 2], words[i + 1]);
 		}
-		if (333..=366).contains(&o) {
+		if (333..=366).contains(&o) || atomic_value(o) {
 			any = true;
 		}
 		i += n;
@@ -2674,9 +2679,9 @@ pub fn localize_subgroup_operands(words: Vec<u32>) -> Vec<u32> {
 	while i < words.len() {
 		let n = (words[i] >> 16) as usize;
 		let o = words[i] & 0xffff;
-		if (333..=366).contains(&o) && n >= 5 {
+		if ((333..=366).contains(&o) && n >= 5) || (atomic_value(o) && n == 7) {
 			let mut a = words[i + 1..i + n].to_vec();
-			let vi = if (349..=364).contains(&o) || o == 342 { 4 } else { 3 };
+			let vi = if atomic_value(o) { 5 } else if (349..=364).contains(&o) || o == 342 { 4 } else { 3 };
 			if vi < a.len() {
 				if let Some(&t) = val_ty.get(&a[vi]) {
 					out.extend(inst(83, &[t, bound, a[vi]]));

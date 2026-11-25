@@ -138,7 +138,7 @@ Open:
    each 64K ops cost 1 MiB of guest RAM per CPU) only if long sessions
    show the same; per-CPU code caches on
    SMP; a cheaper decoder only if decode stays above about 8% of npm's
-   time; Binaryen `-O2` after the lowering, timed on a quiet machine. Apk
+   time. Apk
    and shell: bigger regions (most remaining exits leave full ones), exits
    into self-loop modules, `run`'s entry path and region prologues, NZCV
    materialisation. Not worth revisiting: the compile threshold and heat

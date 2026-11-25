@@ -52,12 +52,13 @@ async function findChrome() {
 // SPIR-V for the real-translator suite
 const naga = join(root, "vendor/build/vk/kwvk-naga.wasm");
 const spirv = {};
-const SHADERS = ["tri.vert", "tri.frag", "double.comp", "quad.vert", "quad.frag", "fs.vert", "ia.frag", "arr.frag", "store.comp", "flat.vert", "flat.frag", "wide.comp", "dead.comp", "barrier.comp", "shared512.comp"];
+const SHADERS = ["tri.vert", "tri.frag", "double.comp", "quad.vert", "quad.frag", "fs.vert", "ia.frag", "arr.frag", "store.comp", "flat.vert", "flat.frag", "wide.comp", "dead.comp", "barrier.comp", "shared512.comp", "shared512fn.comp", "earlyro.comp", "sgids.comp"];
 const work = await mkdtemp(join(tmpdir(), "kwvk-host-"));
 if (existsSync(naga) && existsSync(join(root, "js/core/vk-shader.ts"))) {
 	for (const name of SHADERS) {
 		const out = join(work, `${name}.spv`);
-		const r = spawnSync("glslangValidator", ["-V", "--target-env", "vulkan1.0", "-o", out, join(here, "shaders", name)], { encoding: "utf8" });
+		// subgroup builtins need Vulkan 1.1 SPIR-V
+		const r = spawnSync("glslangValidator", ["-V", "--target-env", name.startsWith("sg") ? "vulkan1.1" : "vulkan1.0", "-o", out, join(here, "shaders", name)], { encoding: "utf8" });
 		if (r.status !== 0) {
 			console.log(`glslangValidator ${name}: ${r.error?.message || r.stdout}`);
 			break;

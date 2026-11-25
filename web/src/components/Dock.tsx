@@ -3,6 +3,11 @@
 // The Dock, macOS style: a pill of glass centered at the bottom (#dock is its
 // strip, which the workspace ends above; the material is style.css's
 // .glass, its menus' too), whose tiles magnify under a mouse (useMagnify).
+// While a maximized window is shown (wm.ts dockHides()) it hides itself below
+// the page (useReveal: data-auto, data-hidden) and the workspace takes its
+// strip; the pointer at the page's bottom edge (#dock-edge) brings it back
+// over the windows. In compact mode it always shows, as a lower bar across
+// the page (style.css).
 // Left to right:
 // - the launcher (#dock-launcher: the Launchpad overlay, Launcher.tsx; also
 //   Ctrl-A o; dimmed while the system does not run: data-off, store.ts
@@ -127,7 +132,7 @@ import { isRunning, ui$, useStore } from "../store.ts";
 import { selectTerminal } from "../terminals.ts";
 import { useTermTabs, windowOf } from "../termtabs.ts";
 import { useWaylandFocused } from "../wayland.ts";
-import { useWm, wm, wm$, type WmWindow } from "../wm.ts";
+import { dockHides, useWm, wm, wm$, type WmWindow } from "../wm.ts";
 import { setTileRect } from "../wmfx.ts";
 import { showWindow, toggleWayland, windowItems } from "../winmenu.tsx";
 import { DockStack, type StackClose } from "./DockStack.tsx";
@@ -293,9 +298,14 @@ const Sep = () => <span aria-hidden="true" className="dock-sep" />;
  * into it, a restored one out of it): the face of the tile that stands for it
  * (data-win, else its dock id), as drawn (magnified or not), kept within the
  * visible part of a strip whose tiles scroll; the Dock's middle when it has
- * no tile; null while the Dock is not shown (the on-screen keyboard).
+ * no tile; null while the Dock is not shown (the on-screen keyboard). Where it
+ * will rest while the Dock slides in; below the page while it is hidden.
  */
 function tileRect(id: string): DOMRect | null {
+	const r = drawnTileRect(id);
+	return r && new DOMRect(r.left, r.top - slideOffset(), r.width, r.height);
+}
+function drawnTileRect(id: string): DOMRect | null {
 	const dock = document.querySelector<HTMLElement>("#dock .dock-pill");
 	const d = dock?.getBoundingClientRect();
 	if (!dock || !d?.width || !d.height) return null;
@@ -313,6 +323,13 @@ function tileRect(id: string): DOMRect | null {
 	return new DOMRect(Math.min(Math.max(face.left, r.left), r.right - face.width), face.top, face.width, face.height);
 }
 setTileRect(tileRect);
+
+/** How far (px) below its place the Dock is drawn while it slides in (style.css #dock translate); 0 while it is hidden. */
+function slideOffset(): number {
+	const dock = document.getElementById("dock");
+	if (!dock || dock.hasAttribute("data-hidden")) return 0;
+	return parseFloat(getComputedStyle(dock).translate.split(" ")[1] ?? "") || 0;
+}
 
 /** Show window w (minimize it when it has the focus already). */
 function activate(w: WmWindow): void {
@@ -376,7 +393,7 @@ function keepItems(id: string): MenuEntry[] {
 const MAG_MAX = 1.3, MAG_REACH = 2.5;
 /** A mouse-like pointer (a live MediaQueryList, made once: magnifies() runs on each pointer move). */
 const FINE = typeof matchMedia === "function" ? matchMedia("(hover: hover) and (pointer: fine)") : null;
-const magnifies = () => !!FINE?.matches && !reducedMotion();
+const magnifies = () => !!FINE?.matches && !reducedMotion() && !wm$.get().compact;
 
 /**
  * macOS-style magnification, for a mouse: the tile under the pointer grows
@@ -386,7 +403,7 @@ const magnifies = () => !!FINE?.matches && !reducedMotion();
  * much each side (--grow-l, --grow-r), the tile under the pointer staying
  * under it. Transforms only: each item gets --mx (and a tile --m, its scale)
  * once a frame, from its layout position (offsetLeft, which transforms do
- * not change). Not on touch, with reduced motion, or while the window tiles
+ * not change). Not on touch, with reduced motion, in compact mode, or while the window tiles
  * scroll (the strip clips then: tiles magnified when they start to go back
  * at once, held or not); not over an open menu. `held` (a tile's
  * menu or a pinned stack is open): it stays as it is, so the tile does not
@@ -638,8 +655,9 @@ const AIM_SLACK = 12;
  */
 function stackTop(el: HTMLElement): number {
 	const r = el.getBoundingClientRect(), pill = el.closest(".dock-pill")?.getBoundingClientRect();
-	if (!pill || !magnifies() || el.closest("[data-scroll]")) return r.top;
-	return Math.min(r.top, pill.top + el.offsetTop - (MAG_MAX - 1) * el.offsetHeight);
+	const slide = slideOffset();
+	if (!pill || !magnifies() || el.closest("[data-scroll]")) return r.top - slide;
+	return Math.min(r.top, pill.top + el.offsetTop - (MAG_MAX - 1) * el.offsetHeight) - slide;
 }
 
 /** Point (x, y) is in the triangle a, b, c (its edges included). */
@@ -734,6 +752,80 @@ function useStackHover(stack: Stack | null, setStack: Dispatch<SetStateAction<St
 	return api;
 }
 
+/**
+ * The hidden Dock shows once a mouse has been at the page's bottom edge this
+ * long, and hides this long after it left the Dock and the edge; after a touch
+ * or a pen lifted, later (ms).
+ */
+const REVEAL_DELAY = 120, HIDE_DELAY = 350, HIDE_DELAY_TOUCH = 2500;
+
+/**
+ * The Dock's hiding (`auto`: wm.ts dockHides()): true while it is hidden. It
+ * shows while the pointer is on it or at the page's bottom edge (`edge`, an
+ * element, so that the Browser's iframe does not swallow the pointer; a touch
+ * or a pen there shows it at once, a mouse with a button down does not), while
+ * `held` (a tile's menu or a group's stack is open), and while a tile has the
+ * keyboard's focus ring. The pointer is followed all the time, so a Dock it
+ * is on stays when a window is maximized from it. Native listeners: React's
+ * would count the menu and the stack, portals made in the Dock, as inside it.
+ */
+function useReveal(dock: RefObject<HTMLElement | null>, edge: RefObject<HTMLElement | null>, auto: boolean, held: boolean): boolean {
+	const [shown, setShown] = useState(false);
+	const [ring, setRing] = useState(false);
+	const over = useRef(false);
+	const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+	const [later] = useState(() => (on: boolean, ms: number) => {
+		clearTimeout(timer.current);
+		if (ms) timer.current = setTimeout(() => setShown(on), ms);
+		else setShown(on);
+	});
+	useEffect(() => {
+		const root = dock.current;
+		if (!root) return;
+		const enter = () => { over.current = true; later(true, 0); };
+		const leave = (e: PointerEvent) => { over.current = false; later(false, e.pointerType === "mouse" ? HIDE_DELAY : HIDE_DELAY_TOUCH); };
+		const focusIn = (e: FocusEvent) => { if (e.target instanceof Element && e.target.matches(":focus-visible")) setRing(true); };
+		const focusOut = () => setRing(false);
+		root.addEventListener("pointerenter", enter);
+		root.addEventListener("pointerleave", leave);
+		root.addEventListener("focusin", focusIn);
+		root.addEventListener("focusout", focusOut);
+		return () => {
+			clearTimeout(timer.current);
+			root.removeEventListener("pointerenter", enter);
+			root.removeEventListener("pointerleave", leave);
+			root.removeEventListener("focusin", focusIn);
+			root.removeEventListener("focusout", focusOut);
+		};
+	}, [dock, later]);
+	useEffect(() => {
+		const el = edge.current;
+		if (!auto || !el) return;
+		const enter = (e: PointerEvent) => {
+			const mouse = e.pointerType === "mouse";
+			if (mouse && e.buttons) return;
+			over.current = true;
+			later(true, mouse ? REVEAL_DELAY : 0);
+		};
+		const leave = (e: PointerEvent) => { over.current = false; later(false, e.pointerType === "mouse" ? HIDE_DELAY : HIDE_DELAY_TOUCH); };
+		el.addEventListener("pointerenter", enter);
+		el.addEventListener("pointerleave", leave);
+		return () => {
+			// The edge goes with auto: a pointer on it gets no leave (one on the Dock gets its own).
+			over.current = !!dock.current?.matches(":hover") && over.current;
+			el.removeEventListener("pointerenter", enter);
+			el.removeEventListener("pointerleave", leave);
+		};
+	}, [dock, edge, auto, later]);
+	// Held: no hide now; let go with the pointer elsewhere: it hides.
+	const hold = held || ring;
+	useEffect(() => {
+		if (hold) later(true, 0);
+		else if (!over.current) later(false, HIDE_DELAY);
+	}, [hold, auto, later]);
+	return auto && !shown && !hold;
+}
+
 export function Dock() {
 	const wayland = useStore((s) => s.wayland);
 	const wlFocused = useWaylandFocused();
@@ -754,8 +846,10 @@ export function Dock() {
 	const nav = useRef<HTMLElement>(null);
 	const root = useRef<HTMLElement>(null);
 	const label = useRef<HTMLDivElement>(null);
+	const edge = useRef<HTMLDivElement>(null);
 	const prefix = useStore((s) => s.prefix);
 	const compact = useWm((s) => s.compact);
+	const auto = useWm(dockHides);
 	// The open group stack (DockStack.tsx) and its hover controller (useStackHover).
 	const [stack, setStack] = useState<Stack | null>(null);
 	const hover = useStackHover(stack, setStack);
@@ -800,10 +894,11 @@ export function Dock() {
 		setMenu(null);
 		if (how === "key" && el?.isConnected) el.focus({ preventScroll: true });
 	};
+	const hidden = useReveal(root, edge, auto, !!menu || !!stack);
 	useScrollFlag(strip);
 	useMagnify(nav, strip, !!menu || (!!stack && !stack.hover), !!stack?.hover);
 	// No label over an open menu or stack, the shortcuts HUD and the tiles' key hints (the prefix), or on a phone.
-	useDockLabel(root, nav, strip, label, !!menu || !!stack || prefix || compact);
+	useDockLabel(root, nav, strip, label, !!menu || !!stack || prefix || compact || hidden);
 	// Keep the focused window's tile in view when the tiles scroll (phones).
 	useEffect(() => {
 		const box = strip.current, el = box?.querySelector<HTMLElement>(':scope > [aria-pressed="true"]');
@@ -813,7 +908,10 @@ export function Dock() {
 	const views = wayland.attached || wlFocused;
 
 	return (
-		<footer id="dock" ref={root} aria-label="Dock" className="relative flex flex-none items-center justify-center select-none">
+		<>
+		{/* Before the Dock, so under its pill. */}
+		{auto && <div id="dock-edge" ref={edge} aria-hidden="true" onMouseDown={keepFocus} />}
+		<footer id="dock" ref={root} aria-label="Dock" data-auto={auto || undefined} data-hidden={hidden || undefined} className="relative flex flex-none items-center justify-center select-none">
 			{!compact && <WallpaperCredit />}
 			<div id="dock-label" ref={label} aria-hidden="true"><span /><span /></div>
 			{menu && spec && <Menu id="dock-tile-menu" label={spec.header} header={spec.header} items={spec.items} anchor={menu.rect} onClose={closeMenu} />}
@@ -888,5 +986,6 @@ export function Dock() {
 			</nav>
 			</DockMenu.Provider>
 		</footer>
+		</>
 	);
 }

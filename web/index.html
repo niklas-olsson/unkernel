@@ -176,6 +176,8 @@
      before then. -->
 <div id="root">
 	<div id="app" data-state="checking" data-blank="start" inert class="fixed inset-x-0 top-0 flex h-dvh flex-col">
+		<!-- Compact mode (Workspace.tsx useCompact()): the Dock's lower bar (style.css #app.compact). -->
+		<script>if (document.documentElement.classList.contains("kw-mobile") || matchMedia("(max-width: 639.98px), (pointer: coarse)").matches) document.getElementById("app").classList.add("compact");</script>
 		<div class="relative flex min-h-0 flex-1">
 			<main id="desktop" class="relative min-h-0 min-w-0 flex-1">
 				<div id="workspace" class="absolute isolate top-[calc(var(--st)+var(--tb-space,0px))] right-(--sr) bottom-0 left-(--sl)">

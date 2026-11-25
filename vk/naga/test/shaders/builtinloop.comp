@@ -1,0 +1,29 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// llama.cpp's rms_norm shape in SPIR-V that spirv-opt did not inline (its
+// generator skips -O for bf16 and rope variants): a helper loops over
+// channels from gl_WorkGroupID.y in steps of gl_NumWorkGroups.y with
+// barriers inside. spv-in reads both builtins in the helper through
+// private copies, which WGSL's uniformity analysis takes as non-uniform;
+// builtins.rs passes them down as arguments. run.ts dispatches it (plain
+// and spirv-opt -O SPIR-V, where the helper is inlined) and compares every
+// output with JavaScript.
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint nch; uint iters; } p;
+layout(std430, binding = 0) writeonly buffer D { float d[]; };
+shared float sh[64];
+
+void work(uint iters) {
+	const uint tid = gl_LocalInvocationID.x;
+	for (uint c = gl_WorkGroupID.y; c < p.nch; c += gl_NumWorkGroups.y) {
+		barrier();
+		sh[tid] = float(c * 64u + tid);
+		barrier();
+		d[(gl_WorkGroupID.x * p.nch + c) * 64u + tid] = sh[63u - tid] + float(gl_WorkGroupID.x * 1000u + iters);
+	}
+}
+
+void main() {
+	work(p.iters);
+}

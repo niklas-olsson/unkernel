@@ -407,17 +407,20 @@ MTE, PAC, BTI, GCS or POE.
 ## Two builds: wasm64 and lowered
 
 `vmlinux` uses memory64 and table64. `kernel/build.sh lower` runs it
-through Binaryen (`wasm-opt -g --memory64-lowering --table64-lowering`,
-about 1 s) to make `vmlinux32.wasm`. Pointers stay i64 in the code and at
-the JS boundary, so imports, exports and JSPI are unchanged; only memory
+through Binaryen (`wasm-opt -g --memory64-lowering --table64-lowering
+-O2`, about 3 s) to make `vmlinux32.wasm`. Pointers stay i64 in the code
+and at the JS boundary, so imports, exports and JSPI are unchanged; only memory
 and table accesses are wrapped to i32, which is exact because RAM is below
 4 GiB. The runtime picks the memory type with `moduleIsMemory64()` and a
 shared memory with `moduleIsSharedMemory()`, which read the module's
 `target_features` section. Without that section it uses the SMP startup
 import to choose the initial sharing.
 
-The lowered build runs at the same speed in V8, is about 20% faster in
-JavaScriptCore, and needs no memory64. The bundle, the page, the CLI's
+The lowering alone runs at the same speed in V8, is about 20% faster in
+JavaScriptCore, and needs no memory64; `-O2` makes the module about 4%
+smaller and Debian shell commands (perl, awk, sort, gzip, xz, tar) about
+3.5% faster in Node (2026-11-24, medians of 4 interleaved boots; `-O3`
+was no faster). The bundle, the page, the CLI's
 default and `createKernel()` use it; `vmlinux` stays the build input and
 the reference (`--kernel vendor/build/kernel/vmlinux`). `lower` is
 required: `wasm-opt` is `$WASM_OPT`, then `vendor/toolchain/binaryen`

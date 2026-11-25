@@ -230,6 +230,20 @@ static uint32_t lim(const char *limits, const char *name, uint32_t dflt)
 	return v > 4294967295.0 ? 4294967295u : (uint32_t)v;
 }
 
+/*
+ * KWVK_SUBGROUP_SIZE=N (a power of two up to 128) asks the host for N as the
+ * subgroup size (default: the host's, 32). Apps size workgroups by it
+ * (llama.cpp's mat-vec shaders run one invocation per workgroup at 1); the
+ * host lowers the subgroup builtins to arithmetic for it, and no subgroup
+ * operation is offered (supportedStages 0). 0: unset or invalid.
+ */
+static uint32_t kw_subgroup_request(void)
+{
+	const char *e = getenv("KWVK_SUBGROUP_SIZE");
+	long n = e && *e ? strtol(e, NULL, 10) : 0;
+	return n >= 1 && n <= 128 && !(n & (n - 1)) ? (uint32_t)n : 0;
+}
+
 static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 {
 	const char *L = js_get(rep->json, "limits");
@@ -278,6 +292,17 @@ static void pd_init(struct kw_physical_device *pd, struct kw_reply *rep)
 		snprintf(p->deviceName, sizeof p->deviceName, "%s", dn);
 	memcpy(p->pipelineCacheUUID, "kwvk-webgpu-0001", 16);
 
+	/* The subgroup size: what the host translates the subgroup builtins for
+	 * (vk/PROTOCOL.md, Amendments, "Subgroup size"); an older host says
+	 * nothing and gets 1, as before (KWVK_SUBGROUP_SIZE then has no effect). */
+	{
+		double sg = js_num(js_get(rep->json, "subgroupSize"), 1);
+		uint32_t n = sg >= 1 && sg <= 128 ? (uint32_t)sg : 1;
+		pd->subgroup_size = n & (n - 1) ? 1 : n;
+		uint32_t want = kw_subgroup_request();
+		if (want && want != pd->subgroup_size)
+			kw_err("KWVK_SUBGROUP_SIZE=%u: the host did not take it (an older host); the subgroup size reported is %u", want, pd->subgroup_size);
+	}
 	/* the host turns swapchain images into a page compositor's pictures (wsi.c, external buffers) */
 	pd->ext_token = (uint32_t)js_num(js_get(js_get(rep->json, "external"), "token"), 0);
 	uint32_t t2 = lim(L, "maxTextureDimension2D", 8192);
@@ -464,7 +489,9 @@ static API VkResult CALL kw_vkCreateInstance(const VkInstanceCreateInfo *ci, con
 	if (!l)
 		return VK_ERROR_INCOMPATIBLE_DRIVER;
 	struct jb b = {0};
-	jb_printf(&b, "{\"op\":\"hello\",\"version\":1}");
+	/* the subgroup size to report: KWVK_SUBGROUP_SIZE, else 0 (the host's
+	 * choice); the reply says what the host translates for (pd_init) */
+	jb_printf(&b, "{\"op\":\"hello\",\"version\":1,\"subgroupSize\":%u}", kw_subgroup_request());
 	struct kw_reply *rep = link_call(l, &b, NULL, 0);
 	jb_free(&b);
 	if (!rep || js_get(rep->json, "err")) {
@@ -3493,7 +3520,7 @@ static API void CALL kw_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pdh, VkP
 		}
 		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: {
 			VkPhysicalDeviceSubgroupProperties *x = (void *)s;
-			x->subgroupSize = 1;
+			x->subgroupSize = PD(pdh)->subgroup_size;
 			x->supportedStages = 0;
 			x->supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
 			x->quadOperationsInAllStages = VK_FALSE;
@@ -3524,7 +3551,7 @@ static API void CALL kw_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pdh, VkP
 			ZBODY(x, VkPhysicalDeviceVulkan11Properties);
 			memcpy(x->deviceUUID, "kwvk-device-0001", 16);
 			memcpy(x->driverUUID, "kwvk-driver-0001", 16);
-			x->subgroupSize = 1;
+			x->subgroupSize = PD(pdh)->subgroup_size;
 			x->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
 			x->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
 			x->maxMultiviewViewCount = 1;

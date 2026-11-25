@@ -57,8 +57,17 @@
 //               for the kernel's yield, up to 20 ms while the guest is busy:
 //               a Wayland app's frame callback took 12 ms of a 75 ms frame on
 //               average (foot under `yes` output). A packet that does not fit
-//               waits on the owner's side with those after it (never a
-//               message: the order is the stream's), retried like the input.
+//               waits on the owner's side with those after it, retried like
+//               the input.
+//   VS_ACK      While the kernel waits idle a burst goes as one "vsock"
+//               message instead (buffers transferred): the worker's event
+//               loop is free then and a "kick" would be posted anyway, and
+//               the ring costs two copies of every byte (a cold 26 MB read
+//               from a 9p mount: 125 ms through the ring, 103 ms so,
+//               2026-11-24). Only with the ring and the owner's queue empty,
+//               and the worker counts the messages it has delivered here:
+//               until it has them all the next bursts go as messages too,
+//               so the stream keeps its order.
 //
 // Frames (one SharedArrayBuffer per display size, made by the worker, sent
 // as "frame-buffer" before the "display" message of that mode): three slots
@@ -78,7 +87,7 @@ import { EVDEV_OP, type FromWorker, type ToWorker } from "./worker-protocol.ts";
 /** Which way the owner and the kernel talk: on one thread, or worker mode by messages or with shared memory. */
 export type KernelTransport = "inline" | "messages" | "shared";
 
-const BELL = 0, IDLE = 1, FRAME_WANT = 2, FRAME_NOW = 3, CON_HEAD = 4, CON_TAIL = 5, EV_HEAD = 6, EV_TAIL = 7, CON_SIZE = 8, SHM_HEAD = 9, SHM_TAIL = 10, VS_HEAD = 11, VS_TAIL = 12;
+const BELL = 0, IDLE = 1, FRAME_WANT = 2, FRAME_NOW = 3, CON_HEAD = 4, CON_TAIL = 5, EV_HEAD = 6, EV_TAIL = 7, CON_SIZE = 8, SHM_HEAD = 9, SHM_TAIL = 10, VS_HEAD = 11, VS_TAIL = 12, VS_ACK = 13;
 const CTL_BYTES = 64;
 /** Console ring, bytes (a power of two). */
 const CON_CAP = 1 << 16;
@@ -130,7 +139,9 @@ export class SharedOwner {
 	#ev: Float64Array;
 	#shm: Float64Array;
 	#vs: Uint8Array;
-	#post: (msg: ToWorker) => void;
+	#post: (msg: ToWorker, transfer?: ArrayBuffer[]) => void;
+	/** "vsock" messages sent (VS_ACK: those the worker delivered). */
+	#vsSent = 0;
 	#shmReads = new Map<number, { resolve: (data: Uint8Array) => void; reject: (e: Error) => void }>();
 	#shmSeq = 0;
 	#conPending: Uint8Array[] = [];
@@ -140,7 +151,7 @@ export class SharedOwner {
 	#closed = false;
 	readonly frames = new SharedFrames();
 
-	constructor(buffer: SharedArrayBuffer, post: (msg: ToWorker) => void) {
+	constructor(buffer: SharedArrayBuffer, post: (msg: ToWorker, transfer?: ArrayBuffer[]) => void) {
 		this.#ctl = new Int32Array(buffer, 0, CTL_BYTES / 4);
 		this.#con = new Uint8Array(buffer, CTL_BYTES, CON_CAP);
 		this.#ev = new Float64Array(buffer, CTL_BYTES + CON_CAP, EV_CAP * 3);
@@ -194,9 +205,16 @@ export class SharedOwner {
 		this.#pump();
 	}
 
-	/** Vsock packets for the guest (VsockHost's), in order; they are copied, so the caller may reuse them. */
+	/** Vsock packets for the guest (VsockHost's), in order; their buffers may be transferred, so the caller gives them up. */
 	vsock(packets: Uint8Array[]): void {
 		if (this.#closed || !packets.length) return;
+		// As a message while the kernel waits idle, or while one is on its way (VS_ACK, at the top of this file).
+		const c = this.#ctl;
+		if (!this.#vsPending.length && Atomics.load(c, VS_HEAD) === Atomics.load(c, VS_TAIL) && (this.#vsSent !== Atomics.load(c, VS_ACK) || Atomics.load(c, IDLE) !== 0)) {
+			this.#vsSent = (this.#vsSent + 1) | 0;
+			this.#post({ t: "vsock", packets }, packets.map((p) => p.buffer as ArrayBuffer));
+			return;
+		}
 		for (const p of packets) this.#vsPending.push(p);
 		this.#pump();
 	}
@@ -471,6 +489,11 @@ export class SharedServer {
 	/** The idle wait ended. */
 	awake(): void {
 		Atomics.store(this.#ctl, IDLE, 0);
+	}
+
+	/** A "vsock" message was delivered (or dropped): the owner may use the ring again. */
+	vsockAck(): void {
+		Atomics.add(this.#ctl, VS_ACK, 1);
 	}
 
 	/** A "kick" message: the owner wrote while the kernel waited idle. */

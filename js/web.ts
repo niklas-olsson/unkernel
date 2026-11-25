@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
 // unkernel for browsers: the universal SDK plus HTTP disks with an
-// IndexedDB overlay, memory sizing for the device, and the bundled kernel
-// fetched (and compiled while it downloads) from next to this module.
+// IndexedDB overlay, Web Audio output, memory sizing for the device, and
+// the bundled kernel fetched (and compiled while it downloads) from next to
+// this module.
 // Distro images are not downloaded here (GitHub release assets cannot be
 // fetched cross-origin): host alpine.erofs (from a release, with its
 // distros.json) yourself and pass its URL, read lazily with Range requests.
@@ -24,6 +25,8 @@ export * from "./core/index.ts";
 export { DATA_DISK_NAME, DATA_DISK_VERSION, IdbStore, dataDiskStore, importDataDisk, openDataDisk, openDistroDisk, openHttpDisk, resetDataDisk, resetHttpDisk } from "./web/disk.ts";
 export type { DataDiskNameOptions, HttpDiskOptions, IdbStoreOptions, OpenDataDiskOptions } from "./web/disk.ts";
 export { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB, isMobile } from "./web/memory.ts";
+export { createAudioOut } from "./web/audio.ts";
+export type { AudioOut, AudioOutOptions, AudioOutState, AudioOutStats } from "./web/audio.ts";
 export { webCpuBlocker } from "./web/cpu.ts";
 export { serveWasiPrograms } from "./web/wasi.ts";
 

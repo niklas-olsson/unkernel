@@ -25,13 +25,13 @@
 // Face, which sends CORS headers): F32, 1.1 MiB, fetched by the page into
 // the installer (`downloads`, cached in the browser) and kept in the app's
 // directory on the data disk. It writes short children's stories, often
-// ungrammatical: a demo of the GPU path, not of a useful model. F32
-// because quantized models (q4_0, q8_0 ...) abort: ggml's shaders for them
-// do not translate to WGSL yet (vk.md, Unsupported). Larger F32 models
-// also want the norm shaders' 512-invocation workgroups, which software
-// WebGPU (SwiftShader: 256) refuses, so MODEL=stories15M (F32, 94 MiB) and
-// other GGUFs (MODEL=PATH or MODEL=https://...) are for a real GPU, and
-// untried on one. stories260K has no chat template, so llama-completion
+// ungrammatical: a demo of the GPU path, not of a useful model. Quantized
+// models run too (2026-11-24: Q4_K_M on a real GPU; mixture-of-experts
+// models abort, vk.md, Unsupported), and the norm shaders' 512-invocation
+// workgroups run on software WebGPU (SwiftShader: 256) as virtual
+// invocations, so MODEL=stories15M (F32, 94 MiB) and other GGUFs
+// (MODEL=PATH or MODEL=https://...) run there too, slowly. stories260K has
+// no chat template, so llama-completion
 // writes stories without end (no token limit, the context shifted when
 // full, end-of-text ignored), or with TURNS=1 continues the text the user
 // types (interactive mode); a model with a template gets its chat
@@ -59,10 +59,9 @@ const LLAMA_SH = String.raw`#!/bin/bash
 # WebGPU). Written by the unkernel launcher's llama.cpp app.
 #   ./llama.sh                       stories260K (F32, 1.1 MiB): stories without end
 #   TURNS=1 ./llama.sh               the same model continues what you type, a turn at a time
-#   MODEL=stories15M ./llama.sh      F32, 94 MiB: better stories, needs a real GPU
+#   MODEL=stories15M ./llama.sh      F32, 94 MiB: better stories, slow on software WebGPU
 #   MODEL=PATH.gguf ./llama.sh       any GGUF here, or MODEL=https://.../x.gguf
 #   ./llama.sh ARGS...               more llama-completion arguments (-n 256, --temp 0)
-# Quantized models (q4_0, q8_0 ...) abort on guest Vulkan for now: use F32.
 set -e
 VER=${VER}
 URL=${TARBALL}
@@ -129,7 +128,6 @@ if [ ! -s "$F" ]; then
 	[ -z "$MSHA" ] || echo "$MSHA  $F.part" | sha256sum -c --quiet || { rm -f "$F.part"; die "$F: wrong SHA-256, deleted"; }
 	mv "$F.part" "$F"
 fi
-case $(basename "$F") in *[Qq][2-8]_* | *[Ii][Qq][1-4]*) say "A quantized model: these abort on guest Vulkan for now (their shaders do not translate yet); F32 ones run." ;; esac
 
 # A model with a chat template chats; one without continues your text.
 if head -c 16777216 "$F" | grep -qa tokenizer.chat_template; then
@@ -187,8 +185,8 @@ export default {
 			"(guest Vulkan in Options): every layer on the GPU (-ngl 99). stories260K is a\n" +
 			"tiny F32 story model (1.1 MiB): expect odd children's stories, without end\n" +
 			"until Ctrl-C. Quantized\n" +
-			"models (q4_0 ...) abort on guest Vulkan for now; F32 ones run. More to try:\n" +
-			"  MODEL=stories15M ./llama.sh           (F32, 94 MiB; needs a GPU, not software WebGPU)\n" +
+			"models (q4_0, Q4_K_M ...) run too. More to try:\n" +
+			"  MODEL=stories15M ./llama.sh           (F32, 94 MiB; slow on software WebGPU)\n" +
 			"  MODEL=https://.../model-f32.gguf ./llama.sh\n" +
 			"  TURNS=1 ./llama.sh                    (you type, it continues: 128 tokens a turn)\n" +
 			"  ./llama.sh --temp 0 -n 64             (more llama-completion arguments)\n" +

@@ -19,7 +19,7 @@
 // for WGSL compilation and pipeline validation (pipelineCheck).
 
 import { formatTable, formatCaps, CAP_FILTER, vkFormat, texFormatInfo, hasDepth, hasStencil, srgbTwin, type VkFormatInfo } from "./vk-formats.ts";
-import { runSubmit } from "./vk-exec.ts";
+import { runSubmit, resolveQueries } from "./vk-exec.ts";
 
 // The translator's interface (js/core/vk-shader.ts), restated so this
 // module does not depend on the wasm loader.
@@ -38,6 +38,8 @@ export interface VkShaderOpts {
 	/** the device's WebGPU features that change the translation ("shader-f16") */
 	features?: string[];
 	limits?: { maxComputeWorkgroupSizeX: number; maxComputeWorkgroupSizeY: number; maxComputeWorkgroupSizeZ: number; maxComputeInvocationsPerWorkgroup: number };
+	/** compute: the subgroup size the guest reports (subgroup builtins without operations become arithmetic for it) */
+	subgroupSize?: number;
 }
 export interface VkShaderBinding {
 	set: number;
@@ -165,6 +167,16 @@ export interface VkRendererOptions {
 	external?: boolean;
 }
 
+/**
+ * The subgroup size the host offers in the hello (vk/PROTOCOL.md, Amendments,
+ * "Subgroup size"): what the ICD reports unless KWVK_SUBGROUP_SIZE asks for
+ * another. Apps size workgroups by it (llama.cpp's mat-vec shaders run one
+ * invocation per workgroup at 1); 32 keeps their largest multiple (4x) within
+ * the 256 invocations every WebGPU device allows. No subgroup operation is
+ * offered: the builtins are arithmetic on the local index (vk-shader.ts).
+ */
+export const VK_SUBGROUP_SIZE = 32;
+
 /** Limits on what one guest stream may make the host hold (the guest is untrusted). */
 export const VK_MAX_FRAME = 1 << 28;
 export const VK_MAX_OBJECTS = 1 << 20;
@@ -275,7 +287,7 @@ function normalize(v: any, depth = 0): any {
 export const VK_FEATURES = [
 	"depth-clip-control", "depth32float-stencil8", "texture-compression-bc", "texture-compression-etc2", "texture-compression-astc",
 	"indirect-first-instance", "rg11b10ufloat-renderable", "bgra8unorm-storage", "float32-filterable", "float32-blendable", "dual-source-blending",
-	"clip-distances", "texture-component-swizzle", "shader-f16", "subgroups",
+	"clip-distances", "texture-component-swizzle", "shader-f16", "subgroups", "timestamp-query",
 ];
 
 /** A GPUDeviceDescriptor for adapter.requestDevice(): the features above the adapter has and its best limits. */
@@ -502,6 +514,8 @@ export class Conn implements VkConnection {
 	lastPresented?: VkPresentInfo;
 	/** the high 32 bits of this connection's external ids (hello reply), 0 before the hello */
 	token = 0;
+	/** the subgroup size the guest reports (hello): compute stages get their subgroup builtins for it; an ICD that asks nothing reports 1 */
+	subgroupSize = 1;
 	/** export id (the low 32 bits) -> the image it names; ids are never given twice */
 	exported = new Map<number, { id: number; img: any }>();
 	nextExport = 1;
@@ -510,6 +524,8 @@ export class Conn implements VkConnection {
 	pending = new Set<number>();
 	/** settles once the WebGPU validation of every submit so far is known (a failed one lost the device first) */
 	checked: Promise<unknown> = Promise.resolve();
+	/** a timestamp read earlier than the one before it was raised (logged once) */
+	tsRaised = false;
 
 	constructor(r: VkRenderer, send: (bytes: Uint8Array) => void, id: number, close?: () => void) {
 		this.r = r;
@@ -836,8 +852,8 @@ export class Conn implements VkConnection {
 		if (!t) {
 			const t0 = performance.now();
 			let res: VkShaderResult;
-			// relink is the host's own post-pass, not a translator option
-			const { relink, ...topts } = opts as VkShaderOpts & { relink?: Record<number, string> };
+			// relink and keepReadOnly are the host's own post-passes, not translator options
+			const { relink, keepReadOnly, ...topts } = opts as VkShaderOpts & { relink?: Record<number, string>; keepReadOnly?: boolean };
 			try {
 				res = this.r.shaders.translate(m.code, topts);
 				if (relink) res = { ...res, wgsl: relinkVertexOutputs(res.wgsl, relink) };
@@ -847,7 +863,10 @@ export class Conn implements VkConnection {
 				// in one dispatch (ggml-vulkan does); WebGPU refuses read-only +
 				// writable storage of one buffer in a usage scope, but allows
 				// writable + writable. (Vertex stages cannot have writable storage.)
-				if (topts.stage === "compute")
+				// keepReadOnly: the pipeline's fallback when WebGPU refused that
+				// (makePipeline readOnlyRetry; vk-exec.ts aliasFix copies such a
+				// buffer aside when the dispatch also binds it writable).
+				if (topts.stage === "compute" && !keepReadOnly)
 					res = {
 						...res,
 						wgsl: res.wgsl.replace(/var<storage(, ?read)?>/g, "var<storage, read_write>"),
@@ -1142,8 +1161,8 @@ export class Conn implements VkConnection {
 		return v;
 	}
 
-	/** Translate the stages of a pipeline message. */
-	stages(msg: any, pushGroupOf: number, setLayouts: number[] = []): { stage: number; kind: string; module: any; res: VkShaderResult; moduleId: number; opts: VkShaderOpts; check: Promise<string | undefined> }[] {
+	/** Translate the stages of a pipeline message (keepReadOnly: compute storage buffers as the shader declares them). */
+	stages(msg: any, pushGroupOf: number, setLayouts: number[] = [], keepReadOnly = false): { stage: number; kind: string; module: any; res: VkShaderResult; moduleId: number; opts: VkShaderOpts; check: Promise<string | undefined> }[] {
 		const out: any[] = [];
 		let arrays: Record<string, { base: number; count: number }> | undefined;
 		setLayouts.forEach((id, s) => {
@@ -1154,6 +1173,7 @@ export class Conn implements VkConnection {
 			const kind = st.stage === 1 ? "vertex" : st.stage === 0x10 ? "fragment" : st.stage === 0x20 ? "compute" : "";
 			if (!kind) throw new Error(`unsupported shader stage ${st.stage}`);
 			const opts: VkShaderOpts = { stage: kind as any, entryPoint: st.name || "main", pushGroup: pushGroupOf };
+			if (keepReadOnly && kind === "compute") (opts as any).keepReadOnly = true;
 			// "shader-f16" keeps float16_t native; without it 16-bit storage is emulated (vk-shader.ts)
 			if (this.dev.features?.has?.("shader-f16")) opts.features = ["shader-f16"];
 			if (kind === "compute" && this.dev.limits) {
@@ -1164,6 +1184,7 @@ export class Conn implements VkConnection {
 				if (noGpu()) opts.limits = { maxComputeWorkgroupSizeX: 1024, maxComputeWorkgroupSizeY: 1024, maxComputeWorkgroupSizeZ: 64, maxComputeInvocationsPerWorkgroup: 1024 };
 			}
 			if (arrays) opts.arrays = arrays;
+			if (kind === "compute") opts.subgroupSize = this.subgroupSize;
 			if (kind === "vertex") opts.flipY = true;
 			const sm = this.get(st.module, "shader");
 			if (st.specializationInfo && !sm.specTypes) sm.specTypes = specTypes(sm.code);
@@ -1214,8 +1235,12 @@ export class Conn implements VkConnection {
 		this.put(msg.id, p);
 		const checks: Promise<string | undefined>[] = p.stages.map((st: any) => st.check);
 		checks.push(scope.then((e: any) => (e ? firstLine(e.message) : undefined), (e: any) => firstLine(e?.message ?? String(e))));
-		const defer = Promise.all(checks).then((errs) => {
-			const why = errs.find(Boolean);
+		const defer = Promise.all(checks).then(async (errs) => {
+			let why = errs.find(Boolean);
+			// compute: refused with read-only storage made read_write (Tint takes
+			// reads of read_write storage as non-uniform): try the shader's own
+			// read-only buffers; the first reason stays if that fails too
+			if (why && p.readOnlyRetry && (await p.readOnlyRetry())) why = undefined;
 			if (!why) return msg.r ? { json: {} } : undefined;
 			p.failed = why;
 			if (msg.r && !UNUSABLE.test(why)) throw new Error(why); // fail() logs and answers err
@@ -1503,8 +1528,13 @@ const SAMPLER_FILTER = ["nearest", "linear"];
 type Handler = (c: Conn, msg: any, bin: Uint8Array) => Reply | Deferred | undefined | Promise<Reply | Deferred | undefined>;
 
 const handlers: Record<string, Handler> = {
-	hello(c) {
+	hello(c, msg) {
 		const dev = c.dev;
+		// the ICD reports what this reply says: the size it asked for
+		// (KWVK_SUBGROUP_SIZE), else the host's; an older ICD asks nothing
+		// and reports 1
+		const want = msg.subgroupSize;
+		if (want !== undefined) c.subgroupSize = Number.isInteger(want) && want >= 1 && want <= 128 && !(want & (want - 1)) ? want : VK_SUBGROUP_SIZE;
 		const limits: Record<string, number> = {};
 		for (const k in dev.limits) {
 			const v = dev.limits[k];
@@ -1525,6 +1555,7 @@ const handlers: Record<string, Handler> = {
 				limits,
 				features,
 				formats: formatTable(dev.features),
+				subgroupSize: c.subgroupSize,
 				...(c.token ? { external: { token: c.token } } : {}),
 			},
 		};
@@ -1858,7 +1889,32 @@ const handlers: Record<string, Handler> = {
 			const st = stages[0]!;
 			c.stats.pipelines++;
 			const gpu = c.dev.createComputePipeline({ label: `kwvk pipeline ${msg.id}`, layout: layout.layout, compute: { module: st.module, entryPoint: st.res.entryPoint } });
-			return { t: "pipeline", kind: "compute", layout, gpu, stage: st, stages, layoutId: msg.layout, variants: new Map() };
+			const p: any = { t: "pipeline", kind: "compute", layout, gpu, stage: st, stages, layoutId: msg.layout, variants: new Map() };
+			// The read_write promotion (translate()) can make WebGPU refuse a
+			// shader it takes as written (ggml's matmul_id: an early return on a
+			// read-only buffer's value before barriers). Then the pipeline is
+			// made with the read-only buffers kept, in an error scope of its own,
+			// and resolves true when that compiled and validated.
+			if (st.res.bindings.some((b: any) => b.ro))
+				p.readOnlyRetry = async (): Promise<boolean> => {
+					p.readOnlyRetry = undefined;
+					let ro: any;
+					c.dev.pushErrorScope("validation");
+					try {
+						const stages2 = c.stages({ stages: [msg.stage] }, pl.setLayouts.length, pl.setLayouts, true);
+						const layout2 = c.pipelineLayout(msg.layout, stages2);
+						c.stats.pipelines++;
+						const gpu2 = c.dev.createComputePipeline({ label: `kwvk pipeline ${msg.id} (read-only kept)`, layout: layout2.layout, compute: { module: stages2[0]!.module, entryPoint: stages2[0]!.res.entryPoint } });
+						ro = { layout: layout2, gpu: gpu2, stage: stages2[0], stages: stages2, variants: new Map(), storageVariants: undefined };
+					} catch {
+						ro = undefined;
+					}
+					const scope = await c.dev.popErrorScope().catch((e: any) => e || true);
+					if (!ro || scope || (await ro.stage.check)) return false;
+					Object.assign(p, ro);
+					return true;
+				};
+			return p;
 		});
 	},
 
@@ -1873,7 +1929,8 @@ const handlers: Record<string, Handler> = {
 		if (set) c.r.gpuCreated();
 		const results = c.dev.createBuffer({ size: count * 8, usage: BU.COPY_SRC | BU.COPY_DST, label: `kwvk query results ${msg.id}` });
 		c.r.gpuCreated();
-		c.put(msg.id, { t: "queryPool", type, count, set, results, avail: new Uint8Array(count) });
+		// written: the query set holds the query's value (resolved when read); seq: order of the writes
+		c.put(msg.id, { t: "queryPool", type, count, set, results, avail: new Uint8Array(count), written: new Uint8Array(count), seq: new Float64Array(count), clock: 0 });
 		return undefined;
 	},
 
@@ -1883,6 +1940,7 @@ const handlers: Record<string, Handler> = {
 		const n = Math.min(msg.queryCount | 0, p.count - first);
 		if (first < 0 || n <= 0) return undefined;
 		p.avail.fill(0, first, first + n);
+		p.written.fill(0, first, first + n);
 		const e = c.dev.createCommandEncoder();
 		e.clearBuffer(p.results, first * 8, n * 8);
 		c.dev.queue.submit([e.finish()]);
@@ -1896,18 +1954,40 @@ const handlers: Record<string, Handler> = {
 		if (first < 0 || n <= 0) throw new Error("query range out of range");
 		const stage = c.dev.createBuffer({ size: n * 8, usage: BU.MAP_READ | BU.COPY_DST });
 		const e = c.dev.createCommandEncoder();
+		const scratch: any[] = [];
+		resolveQueries(c.dev, e, p, first, n, scratch);
 		e.copyBufferToBuffer(p.results, first * 8, stage, 0, n * 8);
 		c.dev.queue.submit([e.finish()]);
 		const available = [...p.avail.subarray(first, first + n)];
+		// the timestamps written, in the order they were written
+		const order = p.type === 2 && p.set ? [...Array(n).keys()].filter((i) => p.written[first + i]).sort((a, b) => p.seq[first + a] - p.seq[first + b]) : [];
 		return {
 			defer: Promise.all([stage.mapAsync(MAP_READ), c.checked]).then(() => {
 				const out = new Uint8Array(stage.getMappedRange().slice(0));
 				stage.unmap();
 				stage.destroy();
+				for (const b of scratch) b.destroy();
 				if (p.type === 0) {
 					// occlusion: WebGPU's values are only zero / non-zero
 					const v = new BigUint64Array(out.buffer);
 					for (let i = 0; i < v.length; i++) v[i] = v[i] ? 1n : 0n;
+				}
+				if (order.length > 1) {
+					// WebGPU allows timestamps that go backwards (a counter reset, a sample the
+					// backend did not write reads 0): a timestamp never reads earlier than the
+					// one written before it, so differences stay >= 0
+					const v = new BigUint64Array(out.buffer);
+					let max = v[order[0]!]!, raised = 0;
+					for (const i of order) {
+						if (v[i]! < max) {
+							v[i] = max;
+							raised++;
+						} else max = v[i]!;
+					}
+					if (raised && !c.tsRaised) {
+						c.tsRaised = true;
+						c.log(`kwvk: getQueryPoolResults: ${raised} of ${order.length} timestamps read earlier than the one written before them (raised to it; logged once)`);
+					}
 				}
 				c.stats.bytesRead += out.length;
 				return { json: { available }, bin: out };

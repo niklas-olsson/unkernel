@@ -1,0 +1,61 @@
+#version 450
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Pooya Parsa <pooya@pi0.io>
+// llama.cpp's norm-family shape: a workgroup of BS invocations (512, or
+// 1024) that reduces a row through shared memory with barriers, wider than
+// a 256-invocation device allows, so the translator runs it as virtual
+// invocations (virt.rs). A uniform early return before the barriers, a
+// strided loop, a tree reduction, a shared atomic counting the
+// invocations, the builtins (and a helper reading the local index through
+// spv-in's private copy), a continue and a return that depend on the
+// invocation after the last barrier. run.ts dispatches it and compares
+// every output with the same float operations, in the same order, in
+// JavaScript.
+layout(constant_id = 0) const uint BS = 512;
+layout(local_size_x_id = 0) in;
+layout(push_constant) uniform P { uint n; uint rows; } p;
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 2) writeonly buffer I { uint ids[]; };
+layout(std430, binding = 3) writeonly buffer S { float sums[]; };
+layout(std430, binding = 4) writeonly buffer C { uint counts[]; };
+shared float s[BS];
+shared uint count;
+
+uint lane() {
+	return gl_LocalInvocationIndex;
+}
+
+void main() {
+	const uint row = gl_WorkGroupID.x;
+	const uint tid = gl_LocalInvocationID.x;
+	if (row >= p.rows)
+		return;
+	if (tid == 0)
+		count = 0;
+	barrier();
+	atomicAdd(count, 1);
+	float sum = 0.0;
+	for (uint i = tid; i < p.n; i += BS)
+		sum += a[row * p.n + i];
+	s[tid] = sum;
+	barrier();
+	for (uint k = BS / 2; k > 0; k >>= 1) {
+		if (tid < k)
+			s[tid] += s[tid + k];
+		barrier();
+	}
+	const float total = s[0];
+	if (tid == 0) {
+		sums[row] = total;
+		counts[row] = count;
+	}
+	ids[gl_GlobalInvocationID.x] = lane() * 4u + (gl_LocalInvocationID.x == tid ? 1u : 0u) + (gl_GlobalInvocationID.x == row * BS + tid ? 2u : 0u);
+	if (tid >= p.n)
+		return;
+	for (uint i = tid; i < p.n; i += BS) {
+		if (i % 3u == 1u)
+			continue;
+		o[row * p.n + i] = a[row * p.n + i] * 2.0 + total;
+	}
+}

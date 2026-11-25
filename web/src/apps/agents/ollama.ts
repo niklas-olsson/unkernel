@@ -35,34 +35,41 @@
 // llama-server --list-devices through the Vulkan loader and finds "kwvk
 // (WebGPU)" with no other requirement (no memory budget extension, no sysfs).
 //
-// On a terminal ollama.sh asks which model (its list: SmolLM2 135M first,
-// Qwen2.5 0.5B and 1.5B, Qwen2.5-Coder 0.5B, Llama 3.2 1B, Qwen3.5 0.8B,
-// stories260K); MODEL= names one, and SmolLM2 is the default without a
-// terminal. All but the story model load on a real GPU only. MODEL=stories260K, as in llama.ts (F32, 1.1 MiB,
-// fetched by the page into the installer), runs on software WebGPU too:
-// made an Ollama model by `ollama create` from a
-// Modelfile (FROM the GGUF, num_predict 128), which keeps its F32 weights;
-// Ollama's library models are quantized and abort on guest Vulkan for now
-// (vk.md, Unsupported), except their fp16 tags. F16 GGUFs run too
-// (stories260K converted to F16 by llama-quantize: the same text, 100% GPU).
-// Wider models need ggml's 512-wide norm shaders (rms_norm_mul_f32_512 is
-// the first refused), which SwiftShader's WebGPU (256 invocations) refuses
-// and the renderer, asking for the adapter's best limits, gets on most real
-// GPUs (1024); so the chat models need a real
-// GPU: MODEL=smollm2 (SmolLM2 135M Instruct, Ollama's
-// smollm2:135m-instruct-fp16, 271 MiB, Apache-2.0; served as smollm2-tools,
-// the same weights under a ChatML template with a tool section) and
-// MODEL=qwen-coder (Qwen2.5-Coder 0.5B Instruct,
-// qwen2.5-coder:0.5b-instruct-fp16, 994 MiB, Apache-2.0; 3 GiB of guest memory or more), fetched
-// from Ollama's registry by ollama.sh with curl into Ollama's store (manifest
-// and blobs, checked): ollama pull cannot, as it refuses redirects to hosts
-// that resolve to non-public addresses, and the page's network answers DNS
-// with synthetic ones (198.18.0.0/15). ollama.sh's exit status says why it
-// stopped: 3 a download failed, 4 guest Vulkan refused a shader, 5 the WebGPU
-// device was lost, 1 anything else. Both answered "a Python function that reverses
-// a string" correctly at temperature 0 on the host's CPU; on kwvk with
-// SwiftShader both abort at that shader, with the hint. A model with a chat
-// template gets `ollama run`'s chat. stories260K has no chat template,
+// On a terminal ollama.sh asks which model (its list: Qwen3 0.6B first,
+// Qwen3 1.7B, Qwen2.5 0.5B and 1.5B, Qwen2.5-Coder 0.5B, Qwen3.5 0.8B,
+// Llama 3.2 1B, SmolLM2 135M, stories260K); MODEL= names one, and Qwen3 0.6B
+// is the default without a terminal. The chat models are the registry's
+// quantized tags (Q4_K_M, Q8_0 where the registry has no Q4_K_M), which run
+// on guest Vulkan since 2026-11-24 (vk.md: Qwen2.5 0.5B Q4_K_M at about 45
+// tokens/s on an Apple M4 Pro with llama.cpp; on software WebGPU,
+// SwiftShader, they run too, at a tenth of a token a second or less, where
+// ggml's 512-wide workgroups run as virtual invocations). On 2026-11-24
+// llama.cpp b12651's own Vulkan build (x86-64, natively through
+// test/vk/relay.mjs on SwiftShader) ran Ollama's qwen3:0.6b (Q4_K_M) and
+// qwen3.5:0.8b (Q8_0) with every layer on kwvk, no pipeline refused and no
+// op on the CPU but the token embeddings' lookup (2 graph splits), and sane
+// text (the CPU backend's for its first tokens). MODEL=qwen3 (Qwen3 0.6B, qwen3:0.6b, Q4_K_M, 498 MiB, Apache-2.0)
+// is a thinking model with tools (THINK=0: no reasoning). MODEL=qwen3.5 is
+// Qwen3.5 0.8B as qwen3.5:0.8b-q8_0 (971 MiB with its vision projector,
+// which Ollama hands llama-server as --mmproj), not qwen3.5:0.8b: that tag
+// adds an MTP draft, for which Ollama starts llama-server with speculative
+// decoding (--spec-type draft-mtp), whose gated_delta_net replay pipelines
+// guest Vulkan refuses (vk.md, Unsupported). MODEL=smollm2 is SmolLM2 135M
+// Instruct (smollm2:135m-instruct-q4_K_M, 100 MiB, Apache-2.0) served as
+// smollm2-tools:q4_K_M, the same weights under a ChatML template with a tool
+// section. F32 and F16 models run too (stories260K converted to F16 by
+// llama-quantize: the same text, 100% GPU; an fp16 tag of the registry when
+// MODEL= names one). MODEL=stories260K, as in llama.ts (F32, 1.1 MiB,
+// fetched by the page into the installer), the fastest on software WebGPU,
+// is made an Ollama model by `ollama create` from a Modelfile (FROM the
+// GGUF, num_predict 128), which keeps its F32 weights. Registry models are
+// fetched by ollama.sh with curl into Ollama's store (manifest and blobs,
+// checked): ollama pull cannot, as it refuses redirects to hosts that
+// resolve to non-public addresses, and the page's network answers DNS with
+// synthetic ones (198.18.0.0/15). ollama.sh's exit status says why it
+// stopped: 3 a download failed, 4 guest Vulkan refused a shader, 5 the
+// WebGPU device was lost, 1 anything else. A model with a chat template
+// gets `ollama run`'s chat. stories260K has no chat template,
 // so Ollama sends the text as it is and the model continues it: ollama.sh
 // writes a story from "Once upon a time", then reads the user's own story
 // starts, each sent as `ollama run stories260k "TEXT"` (Ollama's generate
@@ -77,7 +84,7 @@
 // "offloaded N/M layers to GPU", N > 0), and stops with a message otherwise,
 // since a model on the CPU would be a misleading demo; it stops the server
 // when it ends. A loud failure of guest Vulkan (a refused pipeline aborts
-// ggml, vk.md, Errors) gets a one-line hint. On 2026-11-24 (the guest in
+// ggml, vk.md, Errors) gets a one-line hint. On 2026-11-24 (stories260K, the guest in
 // headless Chromium on SwiftShader, one CPU, 1 GiB) the server answered
 // after 2 s, the model loaded in 7.5-8.5 s and generated 4.5-6.0 tokens/s
 // (the same model on the guest's CPU: 43, much faster than on software
@@ -102,21 +109,25 @@ export const OLLAMA_MODEL_TOOLS = false;
 const OLLAMA_SH = String.raw`#!/bin/bash
 # Ollama with llama.cpp's Vulkan backend on guest Vulkan (kwvk: this page's
 # WebGPU). Written by the unkernel launcher's Ollama app.
-#   ./ollama.sh                     asks which model (on a terminal); Enter: SmolLM2 135M Instruct (F16, 271 MiB): a small, fast chat model that writes simple code (fx's default too; as smollm2-tools, with a tool-call template)
-#   MODEL=qwen-coder ./ollama.sh    Qwen2.5-Coder 0.5B Instruct (F16, 994 MiB): a small coding chat model; guest memory 3 GiB or more
-#   MODEL=qwen ./ollama.sh          Qwen2.5 0.5B Instruct (F16, 994 MiB): the general model of that size, better at tool calls
-#   MODEL=qwen1.5 ./ollama.sh       Qwen2.5 1.5B Instruct (F16, 2950 MiB): three times the size, far better at tool calls; guest memory 4 GiB
-#   MODEL=llama3.2 ./ollama.sh      Llama 3.2 1B Instruct (F16, 2364 MiB): tool calls too
-#   MODEL=stories260K ./ollama.sh   stories260K (F32, 1.1 MiB): a story, then you type story starts; runs on software WebGPU too
-#                                   (both need a GPU whose WebGPU allows 512-wide workgroups: not SwiftShader)
-#   MODEL=PATH.gguf ./ollama.sh     another GGUF here (ollama create), F32 or F16
+#   ./ollama.sh                     asks which model (on a terminal); Enter: Qwen3 0.6B (Q4_K_M, 498 MiB): a small thinking chat model with tools
+#   MODEL=qwen3-1.7b ./ollama.sh    Qwen3 1.7B (Q4_K_M, 1296 MiB): better answers and tool calls (fx's default); guest memory 3 GiB or more
+#   MODEL=qwen ./ollama.sh          Qwen2.5 0.5B Instruct (Q4_K_M, 379 MiB): no thinking, tool calls
+#   MODEL=qwen1.5 ./ollama.sh       Qwen2.5 1.5B Instruct (Q4_K_M, 940 MiB): better at tool calls
+#   MODEL=qwen-coder ./ollama.sh    Qwen2.5-Coder 0.5B Instruct (Q4_K_M, 379 MiB): a small coding chat model
+#   MODEL=qwen3.5 ./ollama.sh       Qwen3.5 0.8B (Q8_0, 971 MiB with its vision projector): newer, a thinking model with tools
+#   MODEL=llama3.2 ./ollama.sh      Llama 3.2 1B Instruct (Q8_0, 1259 MiB): tool calls too
+#   MODEL=smollm2 ./ollama.sh       SmolLM2 135M Instruct (Q4_K_M, 100 MiB): the fastest; simple answers (as smollm2-tools, with a tool-call template)
+#   MODEL=stories260K ./ollama.sh   stories260K (F32, 1.1 MiB): a story, then you type story starts; the fastest on software WebGPU
+#   MODEL=PATH.gguf ./ollama.sh     another GGUF here (ollama create)
 #   TEMP=0 ./ollama.sh              the sampling temperature as the model's default (a derived model NAME-tN)
 #   THINK=0 ./ollama.sh             a thinking model (Qwen3, Qwen3.5) answers without reasoning first (as /set nothink)
 #   SERVE=1 ./ollama.sh             the server only, for other programs: once the model is on kwvk,
 #                                   its Ollama name goes to ollama.ready; Ctrl-C stops the server
-#   MODEL=NAME ./ollama.sh          another model of Ollama's registry ([user/]name[:tag], fetched by curl): an fp16 tag, as the default ones are quantized
-# The server runs while this script does: ollama.log has its log.
-# Quantized models (q4_0, q8_0, q4_K_M ...) abort on guest Vulkan for now: use F32 or F16.
+#   MODEL=NAME ./ollama.sh          another model of Ollama's registry ([user/]name[:tag], fetched by curl)
+# The server runs while this script does: ollama.log has its log. Software
+# WebGPU (SwiftShader) runs the chat models too, at a token every few seconds.
+# Mixture-of-experts models abort on guest Vulkan (a refused pipeline), and
+# so does speculative decoding of Qwen3.5 (the qwen3.5 tags with a draft).
 set -e
 VER=${VER}
 URL=https://github.com/ollama/ollama/releases/download/$VER/ollama-linux-arm64.tar.zst
@@ -146,7 +157,7 @@ die() { printf "$R%s$N\n" "$*" >&2; exit 1; }
 fail() { local st=$1; shift; printf "$R%s$N\n" "$*" >&2; exit $st; }
 
 # No MODEL= on a terminal: ask. Enter takes the first; a number, or any
-# other name ollama.sh takes (an Ollama name with an fp16 tag, a .gguf).
+# other name ollama.sh takes (an Ollama name, a .gguf).
 pick_model() {
 	local i=0 k l ans
 	printf "$B%s$N\n" "Which model? (Enter: 1; or type an Ollama name or a .gguf path; MODEL=... skips this)"
@@ -168,13 +179,15 @@ MENU
 	esac
 }
 if [ -z "$MODEL" ] && [ -z "$SERVE" ] && [ -t 0 ]; then
-	pick_model 'smollm2|SmolLM2 135M (271 MiB): the fastest; simple code
-qwen|Qwen2.5 0.5B (994 MiB): general chat
-qwen-coder|Qwen2.5-Coder 0.5B (994 MiB): code
-llama3.2|Llama 3.2 1B (2364 MiB)
-qwen1.5|Qwen2.5 1.5B (2950 MiB): the best here; guest memory 4 GiB
-qwen3.5|Qwen3.5 0.8B (1684 MiB, BF16): newer, untried on guest Vulkan
-stories260K|stories260K (1.1 MiB): stories only; runs on software WebGPU too'
+	pick_model 'qwen3|Qwen3 0.6B (498 MiB): thinks before it answers (THINK=0: not), tools
+qwen3-1.7b|Qwen3 1.7B (1296 MiB): the best here; guest memory 3 GiB or more
+qwen|Qwen2.5 0.5B (379 MiB): general chat, no thinking
+qwen1.5|Qwen2.5 1.5B (940 MiB): better at tool calls
+qwen-coder|Qwen2.5-Coder 0.5B (379 MiB): code
+qwen3.5|Qwen3.5 0.8B (971 MiB, Q8_0): newer, thinks; untried in Ollama on guest Vulkan
+llama3.2|Llama 3.2 1B (1259 MiB, Q8_0)
+smollm2|SmolLM2 135M (100 MiB): the fastest; simple answers
+stories260K|stories260K (1.1 MiB): stories only; the fastest on software WebGPU'
 fi
 
 # Guest Vulkan: the base's ICD, and a device named kwvk.
@@ -323,19 +336,24 @@ fetch_model() {
 	mv "$man.part" "$man"
 }
 
-# The model: SmolLM2 135M by default (the fx (local model) app's too), from Ollama's
-# registry; stories260K from the page (models/), made an Ollama model once.
+# The model: Qwen3 0.6B by default, from Ollama's registry (its quantized
+# tags); stories260K from the page (models/), made an Ollama model once.
 M=$MODEL
-[ -n "$M" ] || M=smollm2
+[ -n "$M" ] || M=qwen3
 BASE=
 case $M in
 stories260K) F=models/stories260K.gguf NAME=stories260k ;;
-smollm2) F= NAME=smollm2-tools BASE=smollm2:135m-instruct-fp16 ;;
-qwen-coder) F= NAME=qwen2.5-coder:0.5b-instruct-fp16 ;;
-qwen) F= NAME=qwen2.5:0.5b-instruct-fp16 ;;
-qwen1.5) F= NAME=qwen2.5:1.5b-instruct-fp16 ;;
-llama3.2) F= NAME=llama3.2:1b-instruct-fp16 ;;
-qwen3.5) F= NAME=qwen3.5:0.8b-bf16 ;;
+qwen3) F= NAME=qwen3:0.6b ;;
+qwen3-1.7b) F= NAME=qwen3:1.7b ;;
+qwen) F= NAME=qwen2.5:0.5b ;;
+qwen1.5) F= NAME=qwen2.5:1.5b ;;
+qwen-coder) F= NAME=qwen2.5-coder:0.5b ;;
+# Not qwen3.5:0.8b: its MTP draft makes Ollama run speculative decoding,
+# whose gated_delta_net replay pipelines guest Vulkan refuses.
+qwen3.5) F= NAME=qwen3.5:0.8b-q8_0 ;;
+llama3.2) F= NAME=llama3.2:1b ;;
+# (A tag of its own: an older smollm2-tools was made from the fp16 weights.)
+smollm2) F= NAME=smollm2-tools:q4_K_M BASE=smollm2:135m-instruct-q4_K_M ;;
 *.gguf) F=$M NAME=$(basename "$M" .gguf | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._\n-' -) ;;
 *) F= NAME=$M ;;
 esac
@@ -348,10 +366,6 @@ if [ -n "$F" ]; then
 		out=$("$OLLAMA" create "$NAME" -f "models/$NAME.Modelfile" 2>&1) || { printf '%s\n' "$out" | tail -n 3 >&2; die "ollama create failed"; }
 	fi
 else
-	case $NAME in
-	*fp16* | *f16* | *fp32* | *f32*) ;;
-	*) say "$NAME: Ollama's library models are quantized unless the tag says fp16; quantized ones abort on guest Vulkan for now (their shaders do not translate yet)." ;;
-	esac
 	if [ -n "$BASE" ]; then
 		# Ollama's SmolLM2 template declares no tools, so Ollama refuses requests
 		# that carry them (fx's all do): the same weights under a ChatML template
@@ -432,12 +446,11 @@ if [ -n "$TEMP" ]; then
 	fi
 	NAME=$TN
 fi
-case $NAME in *[Qq][2-8]_* | *[Ii][Qq][1-4]*) say "A quantized model: these abort on guest Vulkan for now (their shaders do not translate yet); F32 and F16 ones run." ;; esac
 
 hint() {
 	if grep -qaE 'pipeline creation failed|ErrorInvalidShaderNV|ErrorFeatureNotPresent' "$LOG"; then
 		grep -aE '^kwvk:|pipeline creation failed' "$LOG" | tail -n 2 >&2
-		fail 4 "Hint: guest Vulkan refused one of this model's shaders: quantized types, or (models wider than stories260K) 512-wide workgroups, which software WebGPU (SwiftShader: 256) refuses and most real GPUs allow. Try the default stories260K."
+		fail 4 "Hint: guest Vulkan refused one of this model's shaders (WebGPU cannot run some of llama.cpp's: mixture-of-experts models, speculative decoding of Qwen3.5, some bf16 norms on software WebGPU). Try the default, MODEL=qwen3."
 	elif grep -qa 'device lost' "$LOG"; then
 		fail 5 "Hint: the WebGPU device was lost; run ./ollama.sh again (it gets a new one)."
 	fi
@@ -508,7 +521,7 @@ fi
 export default {
 	id: "ollama",
 	title: "Ollama",
-	desc: "Ollama on the GPU: its server and ollama run on llama.cpp's Vulkan backend, on this browser's WebGPU (guest Vulkan); asks which model (SmolLM2 135M, 271 MiB, to Qwen2.5 1.5B, 2950 MiB; a real GPU), fetched with Ollama (12 MiB) and llama.cpp (29 MiB) on first run",
+	desc: "Ollama on the GPU: its server and ollama run on llama.cpp's Vulkan backend, on this browser's WebGPU (guest Vulkan); asks which model (Qwen3 0.6B, 498 MiB, first; SmolLM2 135M, 100 MiB, to Qwen3 1.7B, 1296 MiB), fetched with Ollama (12 MiB) and llama.cpp (29 MiB) on first run",
 	// A speech bubble with three dots (crafted).
 	icon: { svg: '<path d="M5.5 4h13Q20 4 20 5.5v9q0 1.5-1.5 1.5H11l-4.6 3.7q-.4.3-.4-.2V16h-.5Q4 16 4 14.5v-9Q4 4 5.5 4Z"/><circle cx="8.5" cy="10" r="1.2" fill="#0f766e"/><circle cx="12" cy="10" r="1.2" fill="#0f766e"/><circle cx="15.5" cy="10" r="1.2" fill="#0f766e"/>' },
 	colors: ["#0f766e", "#1e1b4b"],
@@ -520,18 +533,19 @@ export default {
 		README: "Ollama runs this model on the guest's Vulkan, which is this browser's WebGPU\n" +
 			"(guest Vulkan in Options): its server (ollama serve, while ollama.sh runs; its\n" +
 			"log: ollama.log) loads every layer on the GPU. ollama.sh asks which model\n" +
-			"(Enter: SmolLM2 135M Instruct, F16, 271 MiB, fetched once; MODEL=NAME skips\n" +
-			"the question): ask it, e.g., Write a Python function that reverses a string.\n" +
-			"The larger ones need more guest memory (Settings: 3 GiB for the 0.5B models,\n" +
-			"4 GiB above), and all a real GPU (software WebGPU refuses their 512-wide\n" +
-			"workgroups). THINK=0 turns a thinking model's reasoning off, TEMP=N sets the\n" +
-			"temperature. Ctrl-D or /bye quits and stops the\n" +
-			"server. Quantized models (Ollama's library: q4_K_M ...) abort on guest Vulkan\n" +
-			"for now; F32 and F16 ones run. Others:\n" +
-			"  MODEL=qwen1.5 ./ollama.sh              (Qwen2.5 1.5B Instruct, 2950 MiB: the best here)\n" +
+			"(Enter: Qwen3 0.6B, Q4_K_M, 498 MiB, fetched once; MODEL=NAME skips the\n" +
+			"question): ask it, e.g., Write a Python function that reverses a string.\n" +
+			"Qwen3 thinks before it answers: THINK=0 turns that off. The larger models\n" +
+			"want more guest memory (Settings: 3 GiB or more for the 1-2 GB ones), and\n" +
+			"all a real GPU to be quick (software WebGPU runs them at a token every few\n" +
+			"seconds). TEMP=N sets the temperature. Ctrl-D or /bye quits and stops the\n" +
+			"server. Others:\n" +
+			"  MODEL=qwen3-1.7b ./ollama.sh           (Qwen3 1.7B, 1296 MiB: the best here)\n" +
+			"  MODEL=smollm2 ./ollama.sh              (SmolLM2 135M, 100 MiB: the fastest)\n" +
 			"  MODEL=stories260K ./ollama.sh          (a tiny F32 story model, 1.1 MiB, no chat\n" +
-			"                                          template: type story starts; runs on\n" +
-			"                                          software WebGPU too)\n" +
+			"                                          template: type story starts; the\n" +
+			"                                          fastest on software WebGPU)\n" +
+			"  MODEL=qwen3:4b ./ollama.sh             (any model of Ollama's library)\n" +
 			"  MODEL=PATH.gguf ./ollama.sh            (another GGUF, made an Ollama model)\n" +
 			"  ~/.local/share/ollama/" + VER + "/bin/ollama ps   (in another tab while it runs: 100% GPU)\n",
 	},

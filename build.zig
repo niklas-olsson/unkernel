@@ -29,9 +29,10 @@ pub fn build(b: *std.Build) void {
 
     // ---- kwemu: the CPU core as a library for the real kernel -----------------
     // wasm64 relocatable object + static archive with the C ABI of
-    // include/kw_emu.h; conservative wasm features (mvp + memory64): no
-    // threads/atomics/TLS/bulk-memory/sign-ext/nontrapping-fptoint, unless
-    // -Dkwemu-atomics (below).
+    // include/kw_emu.h. wasm features: memory64 plus what the kernel's C
+    // objects (clang's generic cpu) need anyway: bulk memory, sign-ext,
+    // nontrapping-fptoint and mutable globals. No threads/atomics/TLS,
+    // unless -Dkwemu-atomics (below).
     const lib_optimize = b.option(std.builtin.OptimizeMode, "lib-optimize", "Optimization mode for libkwemu (default: ReleaseFast)") orelse .ReleaseFast;
     const stats = b.option(bool, "kwemu-stats", "kwemu: block-cache counters (kw_debug_stats export, printed by the harness; default: false)") orelse false;
     // JIT tier (src/emu/jitcore.zig, src/a64/jit): hot blocks are compiled to wasm through the
@@ -41,13 +42,13 @@ pub fn build(b: *std.Build) void {
     const jit = b.option(bool, "kwemu-jit", "kwemu: wasm JIT tier, needs the unkernel.kw_host_jit_* host imports (default: false)") orelse false;
     const jit_threshold = b.option(u32, "kwemu-jit-threshold", "kwemu: retired instructions in a block before it is compiled (default: 131072)") orelse 1 << 17;
     const jit_grow = b.option(u32, "kwemu-jit-grow", "kwemu: exits from a region towards a compiled block before it joins the region (default: 32768 per KiB of the region's module; 0 = never)") orelse 32768;
-    // wasm atomics + bulk memory in the wasm64 objects, so that a kernel
-    // linked with --shared-memory (wasm-ld refuses objects without both)
-    // can include kwemu. With them (core.smp) exclusives and LSE atomics
+    // wasm atomics in the wasm64 objects, so that a kernel linked with
+    // --shared-memory (wasm-ld refuses objects without atomics and bulk
+    // memory) can include kwemu. With them (core.smp) exclusives and LSE atomics
     // are atomic, a store-exclusive a compare-and-swap against the value the
     // load-exclusive read, and barriers full barriers, for an SMP kernel's
     // CPUs on one memory.
-    const atomics = b.option(bool, "kwemu-atomics", "kwemu: build the wasm64 objects with the atomics and bulk-memory features, for a shared-memory kernel (default: false)") orelse false;
+    const atomics = b.option(bool, "kwemu-atomics", "kwemu: build the wasm64 objects with the atomics feature, for a shared-memory kernel (default: false)") orelse false;
     // kw_run = the A64 reference loop (src/a64/run.zig runRef) instead of
     // the decoded-op tier: the oracle, for comparisons in the kernel.
     const a64_ref = b.option(bool, "kwemu-a64-ref", "kwemu: kw_run runs the A64 reference interpreter instead of the decoded-op tier (default: false)") orelse false;
@@ -61,7 +62,10 @@ pub fn build(b: *std.Build) void {
         .cpu_arch = .wasm64,
         .os_tag = .freestanding,
         .cpu_model = .{ .explicit = &std.Target.wasm.cpu.mvp },
-        .cpu_features_add = if (atomics) std.Target.wasm.featureSet(&.{ .atomics, .bulk_memory }) else .empty,
+        .cpu_features_add = std.Target.wasm.featureSet(if (atomics)
+            &.{ .bulk_memory, .sign_ext, .nontrapping_fptoint, .mutable_globals, .atomics }
+        else
+            &.{ .bulk_memory, .sign_ext, .nontrapping_fptoint, .mutable_globals }),
     });
     const kw_h_wasm = kwHeader(b, wasm64, lib_optimize);
     const kw_h_native = kwHeader(b, native, optimize);

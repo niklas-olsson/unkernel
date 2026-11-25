@@ -21,6 +21,7 @@ Run the row for what you changed, and no more.
 | kwvirtio, virtio-gpu (`js/core/virtio*.ts`) | the kernel row; `node test/gpu/check.mjs` (a dumb-buffer KMS client against the host's frame, a refused and a restored snapshot, display size changes heard by `test/gpu/kms-hotplug.c` inline and in worker mode), `node test/gpu/flip-check.mjs BUNDLE 120 30` (page flips and DIRTYFB at 60 Hz, the idle tail); for SMP paths `--cpus 2 --pin 1`; 3D (`js/core/gl-gpu.ts`, `kw_vgpu_*`): `node test/gl/unkernel-check.mjs --drm` (headless Chromium; gl.md, Testing) |
 | Block, ext4, data disk | `pnpm test:block` |
 | SDK (`js/`) | `pnpm typecheck`; `pnpm test:api` |
+| Web Audio sink (`js/web/audio.ts`) | `pnpm typecheck`; `pnpm test:audio` |
 | Host file systems (9p, `kw9p`) | `pnpm test:9p`; `pnpm test:api` (after a kw9p change, `kernel/build.sh base` first) |
 | Inbound to the guest (`vm.connect`, `vm.fetch`, `websocketOver`, kwtty CONNECT, `--forward`), kwtty's detachable sessions (`vm.attach`) | `pnpm test:http`; `pnpm test:ws`; `pnpm test:tty`; `pnpm test:api` (after a kwtty change, `kernel/build.sh base` first) |
 | Network | `pnpm test:net` |

@@ -546,6 +546,25 @@ mouse or tablet. `onInput` tells you when a program opens the keyboard
 and mouse; until then, send keys to the console. `readFrame()` waits for
 a fresh frame.
 
+In browsers, `createAudioOut()` plays the guest's sound with Web Audio:
+
+```js
+import { createAudioOut, createKernel } from "unkernel/web";
+
+button.hidden = true;
+const audio = createAudioOut({
+  onChange: (state) => { button.hidden = state !== "waiting"; },  // "click to play"
+});
+const vm = await createKernel({ sound: audio });
+button.onclick = () => audio.resume();           // or any other click or key press on the page
+```
+
+Browsers start sound only after a click, tap or key press on the page.
+Until then the latest `holdSeconds` (10) of what the guest plays are held:
+a clip that has ended by then plays whole, a stream joins live.
+`audio.muted = true` silences it. One sink serves one kernel at a time, and
+outlives it: pass it to the next kernel, or `close()` it.
+
 ### GL in the guest (browsers)
 
 ```js
